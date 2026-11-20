@@ -5,13 +5,14 @@
 
 pub mod admin;
 pub mod domains;
+pub mod smtp;
 pub mod store;
 
 use std::borrow::Cow;
 use std::sync::Arc;
 
 use ortus_core::api::Route;
-use ortus_core::app::{AdminSection, App, AppInfo, Group, JobKind};
+use ortus_core::app::{AdminSection, App, AppInfo, Group, JobKind, RoleTask};
 use ortus_core::instance::Instance;
 use ortus_core::retention::Rules;
 use ortus_core::storage::{AsyncTx, BoxFuture, Migration};
@@ -51,6 +52,14 @@ impl App for Mail {
             path: "/admin/domains",
             element: "ortus-mail-domains",
             label: "domains",
+        }]
+    }
+
+    fn role_tasks(&self) -> Vec<RoleTask> {
+        vec![RoleTask {
+            role: ortus_core::config::Role::Mail,
+            name: "smtp",
+            run: smtp::run,
         }]
     }
 

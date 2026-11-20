@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der, PublicKeyX509Der};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::rr::{RData, RecordType};
 use hickory_resolver::TokioResolver;
@@ -215,11 +215,12 @@ pub enum Status {
     Lenient,
 }
 
-/// A resolver for the checks: no cache, the configured servers.
-pub fn resolver() -> Result<TokioResolver, String> {
+/// The DNS servers to ask: `ORTUS_DNS_SERVERS` (`ip:port`, comma
+/// separated), else the system's.
+pub fn resolver_config() -> Result<(ResolverConfig, ResolverOpts), String> {
     let servers = std::env::var("ORTUS_DNS_SERVERS").unwrap_or_default();
-    let mut builder = if servers.trim().is_empty() {
-        TokioResolver::builder_tokio().map_err(|e| e.to_string())?
+    let (config, mut options) = if servers.trim().is_empty() {
+        hickory_resolver::system_conf::read_system_conf().map_err(|e| e.to_string())?
     } else {
         let mut list = Vec::new();
         for server in servers.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -234,15 +235,24 @@ pub fn resolver() -> Result<TokioResolver, String> {
             config.connections = vec![udp, tcp];
             list.push(config);
         }
-        TokioResolver::builder_with_config(
+        (
             ResolverConfig::from_name_servers(list),
-            TokioRuntimeProvider::default(),
+            ResolverOpts::default(),
         )
     };
-    builder.options_mut().cache_size = 0;
-    builder.options_mut().timeout = std::time::Duration::from_secs(5);
-    builder.options_mut().attempts = 2;
-    builder.build().map_err(|e| e.to_string())
+    options.timeout = std::time::Duration::from_secs(5);
+    options.attempts = 2;
+    Ok((config, options))
+}
+
+/// A resolver for the checks: no cache, the configured servers.
+pub fn resolver() -> Result<TokioResolver, String> {
+    let (config, mut options) = resolver_config()?;
+    options.cache_size = 0;
+    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(options)
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 /// What DNS says for a name and type, as text (TXT strings joined).

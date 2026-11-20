@@ -661,3 +661,54 @@ pub async fn purge(tx: &mut dyn AsyncTx, rules: &ortus_core::retention::Rules) -
     delete_files_later(tx, &blobs).await?;
     Ok(doomed.len() as u64)
 }
+
+/// The person an address delivers to here: an address or alias of theirs,
+/// or their account address in one of our domains. Unverified sign-ups
+/// receive nothing.
+pub async fn recipient(store: &dyn AsyncStore, address: &str) -> StoreResult<Option<String>> {
+    let address = address.trim().to_ascii_lowercase();
+    if let Some(user) = store
+        .query(
+            "SELECT user_id FROM mail_addresses WHERE address = $1",
+            &[address.as_str().into()],
+        )
+        .await?
+        .first()
+        .and_then(|r| r.text(0))
+    {
+        return Ok(Some(user.to_string()));
+    }
+    let Some((_, domain)) = address.rsplit_once('@') else {
+        return Ok(None);
+    };
+    let ours = !store
+        .query(
+            "SELECT domain FROM mail_domains WHERE domain = $1",
+            &[domain.into()],
+        )
+        .await?
+        .is_empty();
+    if !ours {
+        return Ok(None);
+    }
+    Ok(store
+        .query(
+            "SELECT id FROM core_users WHERE email = $1 AND state <> 'unverified'",
+            &[address.as_str().into()],
+        )
+        .await?
+        .first()
+        .and_then(|r| r.text(0))
+        .map(str::to_string))
+}
+
+/// Whether a domain is one of ours.
+pub async fn is_our_domain(store: &dyn AsyncStore, domain: &str) -> StoreResult<bool> {
+    Ok(!store
+        .query(
+            "SELECT domain FROM mail_domains WHERE domain = $1",
+            &[domain.to_ascii_lowercase().into()],
+        )
+        .await?
+        .is_empty())
+}
