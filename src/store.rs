@@ -788,9 +788,14 @@ pub async fn index_backlog(instance: &Instance) -> Result<(), String> {
             r.text(2).unwrap_or_default(),
             r.text(3).unwrap_or_default(),
         );
-        let Ok(Some(raw)) = instance.files.get(blob).await else {
-            continue;
-        };
+        // A message whose file is gone is still listed: indexed by its headers.
+        let raw = instance
+            .files
+            .get(blob)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         index_message(instance, user, id, thread, &raw, &summarise(&raw)).await;
     }
     Ok(())
