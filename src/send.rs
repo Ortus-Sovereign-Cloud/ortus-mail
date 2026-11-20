@@ -359,6 +359,10 @@ pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refus
             Ok(delivered) => {
                 stored.push((user.clone(), delivered.message));
                 delivered_here += 1;
+                // An invitation from a colleague's mail app reaches their calendar.
+                if crate::invites::calendar_part(&signed).is_some() {
+                    crate::invites::process(instance, user, &from, &signed).await;
+                }
             }
             Err(_) => return Err(undo(stored).await),
         }

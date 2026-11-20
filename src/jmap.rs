@@ -582,6 +582,9 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
                 "hasAttachment" => json!(s.attachments > 0),
                 "ortusCategory" => json!(s.category),
                 "ortusVerified" => json!(s.verified),
+                "ortusInvite" => crate::invites::shown(ctx.instance, &ctx.user.id, &raw)
+                    .await
+                    .unwrap_or(Value::Null),
                 "ortusSnoozedUntil" => store::snoozed_until(ctx.store(), &ctx.user.id, &s.id)
                     .await?
                     .map_or(Value::Null, |t| json!(utc(t))),

@@ -8,6 +8,7 @@ pub mod compose;
 pub mod domains;
 pub mod imap;
 pub mod import;
+pub mod invites;
 pub mod jmap;
 pub mod later;
 pub mod reports;
@@ -59,6 +60,7 @@ impl App for Mail {
         all.extend(compose::routes());
         all.extend(reports::routes());
         all.extend(import::routes());
+        all.extend(invites::routes());
         all
     }
 
@@ -100,6 +102,13 @@ impl App for Mail {
                 run: imap::run,
             },
         ]
+    }
+
+    fn provide(&self, instance: &Arc<Instance>, services: &ortus_core::services::Services) {
+        let mailer: Arc<dyn ortus_core::interfaces::Mailer> = Arc::new(invites::Service {
+            instance: Arc::downgrade(instance),
+        });
+        services.provide("mail", mailer);
     }
 
     fn sealed(&self) -> Vec<ortus_core::secrets::Place> {

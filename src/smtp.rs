@@ -733,6 +733,22 @@ impl Session {
             }
             return "451 4.3.0 Could not store the message; try again later\r\n".into();
         }
+        // Invitations go to the calendar, when the sender is who they say.
+        if dmarc_word == "pass"
+            && !header_from.is_empty()
+            && crate::invites::calendar_part(&message).is_some()
+        {
+            for (user, _) in stored_for {
+                let (instance, sender, raw) = (
+                    Arc::clone(&self.instance),
+                    header_from.clone(),
+                    message.clone(),
+                );
+                tokio::spawn(async move {
+                    crate::invites::process(&instance, &user, &sender, &raw).await
+                });
+            }
+        }
         "250 2.0.0 OK delivered\r\n".into()
     }
 }
