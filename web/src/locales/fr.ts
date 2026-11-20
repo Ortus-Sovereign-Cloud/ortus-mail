@@ -240,6 +240,13 @@ const messages: Record<MailKey, MailMessage> = {
   "reconnectGone": "Il n’y a rien à reconnecter ici.",
   "reconnectCopying": {"one": "Copie en cours : {count} message jusqu’ici.", "many": "Copie en cours : {count} de messages jusqu’ici.", "other": "Copie en cours : {count} messages jusqu’ici."},
   "reconnectDone": {"one": "Terminé : {count} message copié.", "many": "Terminé : {count} de messages copiés.", "other": "Terminé : {count} messages copiés."},
+  "timesThatWork": "Créneaux qui conviennent",
+  "timesLead": {"one": "{minutes} min · votre agenda est libre", "other": "{minutes} min · les {count} agendas sont libres"},
+  "timesHint": "Les destinataires choisissent un créneau. Aucun compte nécessaire.",
+  "noFreeTimes": "Aucun créneau libre cette semaine ne convient à tous.",
+  "timesFailed": "Impossible de consulter les disponibilités. Réessayez.",
+  "pickLine": "Choisissez un créneau qui vous convient (aucun compte nécessaire) : {url}",
+  "meeting": "Réunion",
 };
 
 export default messages;

@@ -241,6 +241,13 @@ const en = {
   "reconnectGone": "There is nothing to reconnect here.",
   "reconnectCopying": {"one": "Copying: 1 message so far.", "other": "Copying: {count} messages so far."},
   "reconnectDone": {"one": "Done: 1 message copied.", "other": "Done: {count} messages copied."},
+  "timesThatWork": "Times that work",
+  "timesLead": {"one": "{minutes} min · your calendar is free", "other": "{minutes} min · all {count} calendars free"},
+  "timesHint": "Recipients pick a slot. No account needed.",
+  "noFreeTimes": "No free time this week works for everyone.",
+  "timesFailed": "Could not look up free times. Try again.",
+  "pickLine": "Pick a time that works for you (no account needed): {url}",
+  "meeting": "Meeting",
 };
 
 export type MailKey = keyof typeof en;

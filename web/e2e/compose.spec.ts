@@ -105,3 +105,15 @@ test.describe("flows", () => {
     await expect(compose(page).getByRole("textbox", { name: en.subject })).toHaveValue("Briefing notes");
   });
 });
+
+test("without the calendar app, Compose offers no times", async ({ page }) => {
+  await page.goto("/mail/compose");
+  const to = compose(page).getByRole("combobox", { name: en.to });
+  await to.fill("anna@regional.example");
+  await to.press("Enter");
+  const times = compose(page).getByRole("button", { name: en.timesThatWork });
+  await expect(times).toBeEnabled();
+  await times.click();
+  await expect(times).toHaveCount(0);
+  await expect(compose(page).getByRole("alert")).toHaveCount(0);
+});

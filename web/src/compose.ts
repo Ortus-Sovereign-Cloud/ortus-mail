@@ -7,6 +7,7 @@ import { jmap, type Email, type EmailAddress } from "./jmap.js";
 import { navigate, toast } from "./events.js";
 
 const ICON_BACK = svg`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>`;
+const ICON_CALENDAR = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>`;
 const ICON_CLIP = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7"/></svg>`;
 
 /** Undo send: how long a sent message waits before it goes. */
@@ -49,6 +50,28 @@ function tone(text: string): string {
 }
 
 /** The next morning at 08:00, local time. */
+/** How long a meeting offered by "Times that work" is. */
+const SLOT_MINUTES = 30;
+
+/**
+ * A few times to offer from everyone's free half hours: working hours
+ * (08:00 to 18:00 here), at most two a day, two hours apart.
+ */
+export function pickSlots(times: number[], count: number): number[] {
+  const out: number[] = [];
+  for (const time of times) {
+    const d = new Date(time);
+    const minutes = d.getHours() * 60 + d.getMinutes();
+    if (d.getDay() === 0 || d.getDay() === 6 || minutes < 8 * 60 || minutes + SLOT_MINUTES > 18 * 60) continue;
+    const day = new Date(d).setHours(0, 0, 0, 0);
+    const same = out.filter((o) => new Date(o).setHours(0, 0, 0, 0) === day);
+    if (same.length >= 2 || same.some((o) => Math.abs(o - time) < 2 * 3_600_000)) continue;
+    out.push(time);
+    if (out.length === count) break;
+  }
+  return out;
+}
+
 export function tomorrowMorning(now = new Date()): Date {
   const d = new Date(now);
   d.setDate(d.getDate() + 1);
@@ -310,6 +333,54 @@ export class OrtusMailCompose extends LitElement {
         padding: 20px 28px;
         border-block-start: 1px solid var(--ortus-line);
       }
+      .times {
+        margin-block: 0 20px;
+        margin-inline: 28px;
+        padding: 20px;
+        border-radius: 16px;
+        border: 1px solid var(--ortus-line-strong);
+      }
+      .times p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--ortus-text-2);
+      }
+      .times p strong {
+        color: var(--ortus-accent);
+      }
+      .times ul {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 12px;
+        margin-block: 14px;
+        margin-inline: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .times li {
+        display: grid;
+        gap: 4px;
+        padding-block: 12px;
+        padding-inline: 16px;
+        border-radius: 10px;
+        border: 1px solid var(--ortus-line-strong);
+        background: var(--ortus-surface-2);
+      }
+      .times li small {
+        font-size: 13px;
+        color: var(--ortus-text-2);
+      }
+      .times li strong {
+        font-size: 16px;
+      }
+      .icon[aria-pressed="true"] {
+        border-color: var(--ortus-accent);
+        color: var(--ortus-accent);
+      }
+      .icon:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
       .foot .spacer {
         flex: 1;
       }
@@ -458,6 +529,11 @@ export class OrtusMailCompose extends LitElement {
   @state() private saved: "no" | "saving" | "saved" = "no";
   @state() private busy = false;
   @state() private error = "";
+  /** "Times that work": the times offered, or null when the card is closed. */
+  @state() private slots: number[] | null = null;
+  @state() private slotsBusy = false;
+  @state() private calendarsFree = 1;
+  @state() private noCalendar = false;
   private draftId: string | null = null;
   private replyTo: Email | null = null;
   private saveTimer: number | undefined;
@@ -673,6 +749,13 @@ export class OrtusMailCompose extends LitElement {
     this.busy = true;
     this.error = "";
     try {
+      if (this.slots?.length) {
+        // The times go as a link anyone may pick from; once.
+        const offer = await call<{ url: string }>("POST", "/calendar/polls", { summary: this.subject.trim() || t(this.localize, "meeting"), minutes: SLOT_MINUTES, times: this.slots, people: this.to.map((p) => p.email) });
+        const list = this.slots.map((time) => `- ${this.slotText(time)}`).join("\n");
+        this.text = `${this.text.replace(/\s+$/, "")}\n\n${t(this.localize, "pickLine", { url: offer.url })}\n${list}\n`;
+        this.slots = null;
+      }
       this.changed = true;
       const id = await this.save();
       if (!id) throw new Error("draft");
@@ -695,6 +778,52 @@ export class OrtusMailCompose extends LitElement {
     } finally {
       this.busy = false;
     }
+  }
+
+  /** Opens or closes "Times that work": free times for everyone, this week. */
+  private async toggleTimes(): Promise<void> {
+    if (this.slots) {
+      this.slots = null;
+      return;
+    }
+    this.slotsBusy = true;
+    this.error = "";
+    try {
+      const from = Math.ceil((Date.now() + 1) / 1_800_000) * 1_800_000;
+      const to = from + 7 * 86_400_000;
+      const people = this.to.map((p) => p.email).join(",");
+      const r = await call<{ times: number[]; people: { here: boolean }[] }>("GET", `/calendar/free?people=${encodeURIComponent(people)}&from=${from}&to=${to}&minutes=${SLOT_MINUTES}&limit=200`);
+      this.slots = pickSlots(r.times, 4);
+      this.calendarsFree = 1 + r.people.filter((p) => p.here).length;
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 404 || e.status === 501)) this.noCalendar = true;
+      else this.error = t(this.localize, "timesFailed");
+    } finally {
+      this.slotsBusy = false;
+    }
+  }
+
+  private slotText(time: number): string {
+    return new Intl.DateTimeFormat(document.documentElement.lang || "en", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(time));
+  }
+
+  private renderTimes() {
+    if (!this.slots) return nothing;
+    const lang = document.documentElement.lang || "en";
+    return html`<section class="times" aria-labelledby="times-title">
+      <p><strong id="times-title">${t(this.localize, "timesThatWork")}</strong> <span>· ${t(this.localize, "timesLead", { minutes: SLOT_MINUTES, count: this.calendarsFree })}</span></p>
+      ${this.slots.length
+        ? html`<ul>
+            ${this.slots.map(
+              (time) => html`<li>
+                <small>${new Intl.DateTimeFormat(lang, { weekday: "short", day: "numeric" }).format(new Date(time))}</small>
+                <strong>${new Intl.DateTimeFormat(lang, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(time))}</strong>
+              </li>`,
+            )}
+          </ul>`
+        : html`<p class="quiet">${t(this.localize, "noFreeTimes")}</p>`}
+      <p class="quiet">${t(this.localize, "timesHint")}</p>
+    </section>`;
   }
 
   private when(d: Date): string {
@@ -796,12 +925,18 @@ export class OrtusMailCompose extends LitElement {
                 )}
               </div>`
             : nothing}
+          ${this.renderTimes()}
           ${this.warning()}
           ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
           <div class="foot">
             <button class="primary" type="submit" ?disabled=${this.blocked()}>${t(this.localize, "send")}</button>
             <button class="secondary" type="button" ?disabled=${this.blocked()} @click=${() => this.send(tomorrow)}>${t(this.localize, "sendAt", { time: new Intl.DateTimeFormat(document.documentElement.lang || "en", { hour: "2-digit", minute: "2-digit" }).format(tomorrow) })}</button>
             <span class="spacer"></span>
+            ${this.noCalendar
+              ? nothing
+              : html`<button type="button" class="icon" aria-pressed=${this.slots ? "true" : "false"} title=${t(this.localize, "timesThatWork")} ?disabled=${!this.to.length || this.slotsBusy} @click=${this.toggleTimes}>
+                  ${ICON_CALENDAR}<span class="sr">${t(this.localize, "timesThatWork")}</span>
+                </button>`}
             <label class="icon" title=${t(this.localize, "attach")}>
               ${ICON_CLIP}<span class="sr">${t(this.localize, "attach")}</span>
               <input class="sr" type="file" multiple @change=${this.attach} />

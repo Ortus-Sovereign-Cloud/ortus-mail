@@ -240,6 +240,13 @@ const messages: Record<MailKey, MailMessage> = {
   "reconnectGone": "Nie ma tu nic do ponownego połączenia.",
   "reconnectCopying": {"one": "Kopiowanie: na razie 1 wiadomość.", "few": "Kopiowanie: na razie {count} wiadomości.", "many": "Kopiowanie: na razie {count} wiadomości.", "other": "Kopiowanie: na razie {count} wiadomości."},
   "reconnectDone": {"one": "Gotowe: skopiowano 1 wiadomość.", "few": "Gotowe: skopiowano {count} wiadomości.", "many": "Gotowe: skopiowano {count} wiadomości.", "other": "Gotowe: skopiowano {count} wiadomości."},
+  "timesThatWork": "Pasujące terminy",
+  "timesLead": {"one": "{minutes} min · Twój kalendarz jest wolny", "few": "{minutes} min · wszystkie {count} kalendarze wolne", "many": "{minutes} min · wszystkie {count} kalendarzy wolnych", "other": "{minutes} min · wszystkie {count} kalendarza wolne"},
+  "timesHint": "Odbiorcy wybierają termin. Konto nie jest potrzebne.",
+  "noFreeTimes": "W tym tygodniu nie ma terminu pasującego wszystkim.",
+  "timesFailed": "Nie udało się sprawdzić wolnych terminów. Spróbuj ponownie.",
+  "pickLine": "Wybierz pasujący termin (konto nie jest potrzebne): {url}",
+  "meeting": "Spotkanie",
 };
 
 export default messages;

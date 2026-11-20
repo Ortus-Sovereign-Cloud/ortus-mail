@@ -240,6 +240,13 @@ const messages: Record<MailKey, MailMessage> = {
   "reconnectGone": "Тут нічого не треба повторно під’єднувати.",
   "reconnectCopying": {"one": "Копіювання: поки {count} лист.", "few": "Копіювання: поки {count} листи.", "many": "Копіювання: поки {count} листів.", "other": "Копіювання: поки {count} листа."},
   "reconnectDone": {"one": "Готово: скопійовано {count} лист.", "few": "Готово: скопійовано {count} листи.", "many": "Готово: скопійовано {count} листів.", "other": "Готово: скопійовано {count} листа."},
+  "timesThatWork": "Зручний час",
+  "timesLead": {"one": "{minutes} хв · ваш календар вільний", "few": "{minutes} хв · усі {count} календарі вільні", "many": "{minutes} хв · усі {count} календарів вільні", "other": "{minutes} хв · усі {count} календаря вільні"},
+  "timesHint": "Отримувачі обирають час. Обліковий запис не потрібен.",
+  "noFreeTimes": "Цього тижня немає часу, зручного для всіх.",
+  "timesFailed": "Не вдалося знайти вільний час. Спробуйте ще раз.",
+  "pickLine": "Оберіть зручний час (обліковий запис не потрібен): {url}",
+  "meeting": "Зустріч",
 };
 
 export default messages;
