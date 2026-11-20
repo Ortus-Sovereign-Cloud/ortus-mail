@@ -134,6 +134,7 @@ impl App for Mail {
             (store::WAKE_JOB, 60 * 1000),
             (import::IMPORT_WATCH_JOB, 5 * 60 * 1000),
             (store::UPLOADS_JOB, 60 * 60 * 1000),
+            (store::INDEX_JOB, 5 * 60 * 1000),
         ]
     }
 
@@ -156,13 +157,23 @@ impl App for Mail {
             },
             JobKind {
                 kind: store::DELETE_FILES_JOB.into(),
-                handler: Box::new(move |job, _tx| {
+                handler: Box::new(move |job, tx| {
                     let instance = Arc::clone(&instance);
                     let payload = job.payload.clone();
                     Box::pin(async move {
                         let blobs: Vec<String> =
                             serde_json::from_str(&payload).map_err(|e| e.to_string())?;
                         for blob in blobs {
+                            if let Some(message) = store::message_of_blob(&blob) {
+                                ortus_core::search::remove_in(
+                                    &mut *tx,
+                                    instance.store.engine(),
+                                    "mail",
+                                    message,
+                                )
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            }
                             instance
                                 .files
                                 .delete(&blob)
@@ -203,6 +214,16 @@ impl App for Mail {
                 handler: Box::new(move |job| {
                     let instance = Arc::clone(&import);
                     Box::pin(async move { import::run(&instance, job).await })
+                }),
+            },
+            OutsideJobKind {
+                kind: store::INDEX_JOB.into(),
+                handler: Box::new({
+                    let instance = Arc::clone(instance);
+                    move |_| {
+                        let instance = Arc::clone(&instance);
+                        Box::pin(async move { store::index_backlog(&instance).await })
+                    }
                 }),
             },
             OutsideJobKind {

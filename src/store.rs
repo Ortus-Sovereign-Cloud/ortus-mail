@@ -504,6 +504,17 @@ pub async fn deliver(
         Ok(Delivered { message: id.clone(), thread, uid })
     }
     .await;
+    if let Ok(done) = &result {
+        index_message(
+            instance,
+            user_id,
+            &done.message,
+            &done.thread,
+            raw,
+            &summary,
+        )
+        .await;
+    }
     if result.is_err() {
         let _ = instance.files.delete(&blob).await;
     }
@@ -710,8 +721,79 @@ pub async fn expunge(instance: &Instance, mailbox_id: &str, uid: i64) -> StoreRe
     if let Some(blob) = blob {
         // A file left behind is only space; the database no longer points at it.
         let _ = instance.files.delete(&blob).await;
+        if let Some(message) = message_of_blob(&blob) {
+            let _ = ortus_core::search::remove(instance.store.as_ref(), "mail", message).await;
+        }
     }
     Ok(true)
+}
+
+/// Puts a message in the search index (its subject, sender and text).
+pub async fn index_message(
+    instance: &Instance,
+    user_id: &str,
+    message: &str,
+    thread: &str,
+    raw: &[u8],
+    summary: &Summary,
+) {
+    let body = MessageParser::default()
+        .parse(raw)
+        .and_then(|m| m.body_text(0).map(|t| t.into_owned()))
+        .unwrap_or_default();
+    let from = summary
+        .from_name
+        .clone()
+        .filter(|n| !n.is_empty())
+        .or_else(|| summary.from_addr.clone())
+        .unwrap_or_default();
+    let entry = ortus_core::search::Entry {
+        app: "mail",
+        id: message,
+        owner: user_id,
+        title: &summary.subject,
+        body: &format!(
+            "{from} {}\n{body}",
+            summary.from_addr.as_deref().unwrap_or_default()
+        ),
+        meta: json!({"path": format!("/mail?thread={thread}"), "from": from, "attachment": summary.attachments > 0}),
+        at: summary.sent_at.unwrap_or_else(now),
+    };
+    if let Err(e) = ortus_core::search::index(instance.store.as_ref(), &entry).await {
+        eprintln!("ortus: mail: indexing a message: {e}");
+    }
+}
+
+/// The message a file belongs to (`mail/<user>/<message>.eml`).
+pub fn message_of_blob(blob: &str) -> Option<&str> {
+    blob.rsplit('/').next()?.strip_suffix(".eml")
+}
+
+/// Mail stored before the search index: put in it, some at a time.
+pub const INDEX_JOB: &str = "mail.index";
+
+pub async fn index_backlog(instance: &Instance) -> Result<(), String> {
+    let rows = instance
+        .store
+        .query(
+            "SELECT m.id, m.user_id, m.thread_id, m.blob FROM mail_messages m WHERE NOT EXISTS (SELECT 1 FROM core_search s WHERE s.app = 'mail' AND s.id = m.id) ORDER BY m.received_at DESC LIMIT 300",
+            &[],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    for r in rows {
+        let (id, user, thread, blob) = (
+            r.text(0).unwrap_or_default(),
+            r.text(1).unwrap_or_default(),
+            r.text(2).unwrap_or_default(),
+            r.text(3).unwrap_or_default(),
+        );
+        let Ok(Some(raw)) = instance.files.get(blob).await else {
+            continue;
+        };
+        index_message(instance, user, id, thread, &raw, &summarise(&raw)).await;
+    }
+    Ok(())
 }
 
 /// The job that removes files once their messages are gone.
