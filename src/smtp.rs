@@ -8,6 +8,7 @@
 //! `ORTUS_MAIL_TLS_CERT` and `ORTUS_MAIL_TLS_KEY` (PEM files; STARTTLS is
 //! offered when both are set), `ORTUS_MAIL_MAX_SIZE` (bytes, default 25 MB).
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +35,43 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const HANDSHAKE: Duration = Duration::from_secs(30);
 /// Connections at once on one port.
 const MAX_CONNECTIONS: usize = 1000;
+/// Connections one address may hold at once.
+const PER_ADDRESS: usize = 20;
+
+type Addresses = Arc<std::sync::Mutex<HashMap<IpAddr, usize>>>;
+
+/// One address's hold on a connection slot, given back when dropped.
+struct Slot {
+    all: Addresses,
+    ip: IpAddr,
+}
+
+impl Slot {
+    fn take(all: &Addresses, ip: IpAddr) -> Option<Slot> {
+        let mut map = all.lock().unwrap_or_else(|e| e.into_inner());
+        let n = map.entry(ip).or_insert(0);
+        if *n >= PER_ADDRESS {
+            return None;
+        }
+        *n += 1;
+        Some(Slot {
+            all: Arc::clone(all),
+            ip,
+        })
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut map = self.all.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.ip);
+            }
+        }
+    }
+}
 
 pub fn max_size() -> usize {
     std::env::var("ORTUS_MAIL_MAX_SIZE")
@@ -151,6 +189,7 @@ pub async fn serve_as(
         Arc::new(MessageAuthenticator::new(config, options).map_err(|e| e.to_string())?);
     let tls = tls();
     let open = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    let per_address: Addresses = Arc::new(std::sync::Mutex::new(HashMap::new()));
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -160,9 +199,13 @@ pub async fn serve_as(
                     continue;
                 };
                 let Ok(permit) = Arc::clone(&open).try_acquire_owned() else { continue };
+                // At most PER_ADDRESS connections from one address, so one
+                // sender cannot hold every slot.
+                let Some(slot) = Slot::take(&per_address, peer.ip()) else { continue };
                 let (instance, authenticator, tls) = (Arc::clone(&instance), Arc::clone(&authenticator), tls.clone());
                 tokio::spawn(async move {
                     let _permit = permit;
+                    let _slot = slot;
                     let session = Session::new(instance, authenticator, peer, tls.is_some(), mode);
                     if let Err(e) = session.run(socket, tls).await {
                         eprintln!("ortus: mail: SMTP from {peer}: {e}");
@@ -402,7 +445,10 @@ impl Session {
                     Some(i) => i,
                     None => {
                         write(reader.get_mut(), "334 \r\n").await?;
-                        read_line(reader).await?.unwrap_or_default()
+                        tokio::time::timeout(COMMAND_TIMEOUT, read_line(reader))
+                            .await
+                            .map_err(|_| "no answer".to_string())??
+                            .unwrap_or_default()
                     }
                 };
                 let decoded = b64.decode(response.trim()).unwrap_or_default();
@@ -415,9 +461,15 @@ impl Session {
             }
             "LOGIN" => {
                 write(reader.get_mut(), "334 VXNlcm5hbWU6\r\n").await?;
-                let user = read_line(reader).await?.unwrap_or_default();
+                let user = tokio::time::timeout(COMMAND_TIMEOUT, read_line(reader))
+                    .await
+                    .map_err(|_| "no answer".to_string())??
+                    .unwrap_or_default();
                 write(reader.get_mut(), "334 UGFzc3dvcmQ6\r\n").await?;
-                let password = read_line(reader).await?.unwrap_or_default();
+                let password = tokio::time::timeout(COMMAND_TIMEOUT, read_line(reader))
+                    .await
+                    .map_err(|_| "no answer".to_string())??
+                    .unwrap_or_default();
                 (
                     String::from_utf8_lossy(&b64.decode(user.trim()).unwrap_or_default())
                         .into_owned(),
@@ -588,6 +640,11 @@ impl Session {
         } else {
             SpfParameters::mail_from(ip, &helo, &self.host, &from)
         };
+        // One From header with one address: with two, DMARC finds no policy
+        // while the reader is shown the second.
+        if !crate::send::single_from(&message) {
+            return "550 5.7.1 A message has one From header with one address\r\n".into();
+        }
         let spf = self.authenticator.verify_spf(spf_params).await;
         let dkim = self.authenticator.verify_dkim(&parsed).await;
         let header_from = parsed.first_from_address().to_ascii_lowercase();
@@ -607,6 +664,21 @@ impl Session {
         let failed = !matches!(dmarc.dkim_result(), DmarcResult::Pass)
             && !matches!(dmarc.spf_result(), DmarcResult::Pass);
         let policy = dmarc.policy();
+        // Mail from outside that claims to come from one of our own domains
+        // and does not pass for it is refused whatever the published policy
+        // (p=none while a domain is being set up).
+        let claimed = header_from
+            .rsplit_once('@')
+            .map(|(_, d)| d)
+            .unwrap_or_default();
+        if failed
+            && !claimed.is_empty()
+            && store::is_our_domain(self.instance.store.as_ref(), claimed)
+                .await
+                .unwrap_or(false)
+        {
+            return "550 5.7.1 Mail from our own domain comes from our own servers\r\n".into();
+        }
         if failed && policy == Policy::Reject {
             return "550 5.7.1 DMARC: the sending domain says to reject this\r\n".into();
         }

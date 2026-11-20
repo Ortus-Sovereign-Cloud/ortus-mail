@@ -176,6 +176,24 @@ pub fn labels_in(raw: &[u8]) -> Vec<String> {
     out
 }
 
+/// Whether a message has exactly one From header naming exactly one
+/// address. Two From headers (or several addresses) let a reader be shown
+/// one sender while the checks look at another.
+pub fn single_from(raw: &[u8]) -> bool {
+    let Some(message) = mail_parser::MessageParser::default().parse(raw) else {
+        return false;
+    };
+    let headers = message
+        .headers()
+        .iter()
+        .filter(|h| matches!(h.name(), mail_parser::HeaderName::From))
+        .count();
+    headers == 1
+        && message
+            .from()
+            .is_some_and(|f| f.mailboxes().filter(|m| m.address().is_some()).count() == 1)
+}
+
 /// The addresses in a message's From and Sender headers.
 fn from_addresses(raw: &[u8]) -> Vec<String> {
     let Some(message) = mail_parser::MessageParser::default().parse(raw) else {
@@ -215,8 +233,11 @@ async fn route(instance: &Instance, out: &Outgoing<'_>, record: bool) -> Result<
     {
         return Err(Refused::NotYourAddress);
     }
-    // The message says who it is from too: every such address must be the
+    // The message says who it is from too: one From, one address, the
     // sender's own, or a colleague could be impersonated, signed and all.
+    if !out.raw.is_empty() && !single_from(out.raw) {
+        return Err(Refused::NotYourAddress);
+    }
     for address in from_addresses(out.raw) {
         if store::recipient(store, &address)
             .await
@@ -676,4 +697,25 @@ pub async fn deliver(instance: Arc<Instance>, job: &Job) -> Result<(), String> {
     }
     record(&instance, &delivery, "deferred", Some(&last_error)).await;
     Err(last_error)
+}
+
+#[cfg(test)]
+mod from_tests {
+    use super::single_from;
+
+    #[test]
+    fn one_from_header_with_one_address() {
+        assert!(single_from(
+            b"From: Anna <anna@regional.example>\r\nSubject: x\r\n\r\nHi\r\n"
+        ));
+        // Two From headers: the checks and the reader would disagree.
+        assert!(!single_from(
+            b"From: x@evil.example\r\nFrom: \"Minister\" <minister@ministry.example>\r\nSubject: x\r\n\r\nHi\r\n"
+        ));
+        // Two addresses in one, or none.
+        assert!(!single_from(
+            b"From: a@x.example, b@y.example\r\nSubject: x\r\n\r\nHi\r\n"
+        ));
+        assert!(!single_from(b"Subject: x\r\n\r\nHi\r\n"));
+    }
 }

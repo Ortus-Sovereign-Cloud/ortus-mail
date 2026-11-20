@@ -294,7 +294,9 @@ fn starttls_is_offered_and_used() {
     assert!(talk("MAIL FROM:<x@sender.example>").starts_with("250"));
     assert!(talk("RCPT TO:<olena@ministry.example>").starts_with("250"));
     assert!(talk("DATA").starts_with("354"));
-    assert!(talk("Subject: over TLS\r\n\r\nhello\r\n.").starts_with("250"));
+    assert!(
+        talk("From: x@sender.example\r\nSubject: over TLS\r\n\r\nhello\r\n.").starts_with("250")
+    );
     let olena = block_on(ortus_core::auth::accounts::by_email(
         instance.store.as_ref(),
         "olena@ministry.example",
