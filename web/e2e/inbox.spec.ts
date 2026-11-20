@@ -124,5 +124,6 @@ test("an invitation shows its card; without the calendar app there is nothing to
   const card = inbox(page).getByRole("region", { name: en.invitation, exact: true });
   await expect(card).toContainText("River levels");
   await expect(card.getByRole("group", { name: en.yourAnswer })).toHaveCount(0);
+  await expect(inbox(page).locator(".files")).toHaveCount(0);
   await expect(inbox(page).getByRole("complementary").filter({ hasText: en.agendaToday })).toContainText(en.agendaEmpty);
 });

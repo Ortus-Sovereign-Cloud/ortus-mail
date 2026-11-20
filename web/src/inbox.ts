@@ -1214,6 +1214,8 @@ export class OrtusMailInbox extends LitElement {
         </div>
       </article>`;
     }
+    // The invitation is in its card, not among the files.
+    const files = (m.attachments ?? []).filter((a) => !(m.ortusInvite && (a.type ?? "").toLowerCase().startsWith("text/calendar")));
     return html`<article>
       <div class="sender">
         <span class="avatar ${tone(name)}" aria-hidden="true">${initials(name)}</span>
@@ -1225,9 +1227,9 @@ export class OrtusMailInbox extends LitElement {
       </div>
       <p class="body" dir="auto">${m.ortusText ?? m.preview}</p>
       ${m.ortusInvite ? this.inviteCard(m, m.ortusInvite) : nothing}
-      ${m.attachments?.length
+      ${files.length
         ? html`<div class="files">
-            ${m.attachments.map((a) => {
+            ${files.map((a) => {
               const ext = (a.name ?? "").split(".").pop()?.toUpperCase().slice(0, 4) || "FILE";
               return html`<a class="file" href="/api/v1/mail/web/download/${encodeURIComponent(a.blobId)}/${encodeURIComponent(a.name ?? "file")}" download=${a.name ?? "file"}>
                 <span class="badge ${ext === "PDF" ? "" : "doc"}" aria-hidden="true">${ext}</span>
