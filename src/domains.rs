@@ -446,6 +446,14 @@ pub async fn check(instance: &Instance, domain: &str) -> Result<Vec<Checked>, St
         .ok_or("not_found")?;
     let hosts = Hosts::of(instance);
     let resolver = resolver()?;
+    // The resolver asked, not each name looked up.
+    let servers = std::env::var("ORTUS_DNS_SERVERS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "system resolver".into());
+    for server in servers.split(',') {
+        ortus_core::outbound::note(store, "dns", server.trim()).await;
+    }
     let mut checks = Vec::new();
     for expected in expected(domain, &hosts, &stored.keys, "quarantine", &stored.sts_id) {
         let name = if expected.name == "@" {
@@ -459,7 +467,6 @@ pub async fn check(instance: &Instance, domain: &str) -> Result<Vec<Checked>, St
             "SRV" => RecordType::SRV,
             _ => RecordType::TXT,
         };
-        ortus_core::outbound::note(store, "dns", &name).await;
         let found = found(&resolver, &name, kind).await;
         let status = judge(&expected, &found);
         checks.push(Checked {
