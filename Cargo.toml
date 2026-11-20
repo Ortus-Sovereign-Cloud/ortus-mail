@@ -11,8 +11,11 @@ publish = false
 # Built from the commit in pins.toml (checked out by ci/fetch.sh), never
 # from the branch: see the patch below.
 ortus-core = { git = "https://github.com/Ortus-Sovereign-Cloud/ortus-core" }
+# The built web client (web/dist), embedded; `npm run build` in web/ first.
+rust-embed = "8.14.0"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 rust-web-server = "18.34"
 serde_json = "1"
 
