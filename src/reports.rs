@@ -41,7 +41,6 @@ struct Feedback {
 
 #[derive(Debug, Deserialize)]
 struct Metadata {
-    org_name: String,
     report_id: String,
     date_range: Range,
 }
@@ -134,10 +133,15 @@ fn report_xml(raw: &[u8]) -> Vec<Vec<u8>> {
     let Some(message) = MessageParser::default().parse(raw) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
-    for part in message.parts() {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut total = 0u64;
+    for part in message.parts().take(20) {
         if part.is_multipart() {
             continue;
+        }
+        // All of one message's reports together stay under the limit.
+        if total >= MAX_XML {
+            break;
         }
         let kind = part
             .content_type()
@@ -159,7 +163,12 @@ fn report_xml(raw: &[u8]) -> Vec<Vec<u8>> {
         } else {
             None
         };
-        out.extend(xml);
+        if let Some(xml) = xml {
+            total += xml.len() as u64;
+            if total <= MAX_XML {
+                out.push(xml);
+            }
+        }
     }
     out
 }
@@ -176,9 +185,11 @@ async fn source_name(resolver: &hickory_resolver::TokioResolver, ip: &str) -> Op
     (labels.len() >= 2).then(|| labels[labels.len() - 2..].join("."))
 }
 
-/// Takes the reports in a received message. Answers how many were kept;
-/// reports about domains that are not ours, or seen before, are dropped.
-pub async fn take(instance: &Instance, raw: &[u8]) -> Result<usize, String> {
+/// Takes the reports in a received message from `reporter` (the domain
+/// that DMARC confirmed sent it; reports are kept by it and their id).
+/// Answers how many were kept; reports about domains that are not ours,
+/// or seen before, are dropped.
+pub async fn take(instance: &Instance, raw: &[u8], reporter: &str) -> Result<usize, String> {
     let store = instance.store.as_ref();
     let resolver = crate::domains::resolver().ok();
     let mut kept = 0;
@@ -203,7 +214,7 @@ pub async fn take(instance: &Instance, raw: &[u8]) -> Result<usize, String> {
         let added = store
             .execute(
                 "INSERT INTO mail_dmarc_reports (id, domain, org, report_id, begin_at, end_at, received_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (org, report_id) DO NOTHING",
-                &[id.as_str().into(), domain.as_str().into(), meta.org_name.chars().take(200).collect::<String>().into(), meta.report_id.chars().take(200).collect::<String>().into(), (meta.date_range.begin * 1000).into(), (meta.date_range.end * 1000).into(), now().into()],
+                &[id.as_str().into(), domain.as_str().into(), reporter.to_ascii_lowercase().chars().take(200).collect::<String>().into(), meta.report_id.chars().take(200).collect::<String>().into(), meta.date_range.begin.clamp(0, i64::MAX / 1000).saturating_mul(1000).into(), meta.date_range.end.clamp(0, i64::MAX / 1000).saturating_mul(1000).into(), now().into()],
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -215,7 +226,14 @@ pub async fn take(instance: &Instance, raw: &[u8]) -> Result<usize, String> {
             let ip = record.row.source_ip.trim().to_string();
             if !names.contains_key(&ip) {
                 let name = match &resolver {
-                    Some(r) => source_name(r, &ip).await,
+                    // A few hundred lookups at most, each one quick.
+                    Some(r) if names.len() < 200 => {
+                        tokio::time::timeout(std::time::Duration::from_secs(3), source_name(r, &ip))
+                            .await
+                            .ok()
+                            .flatten()
+                    }
+                    Some(_) => None,
                     None => None,
                 };
                 names.insert(ip.clone(), name);

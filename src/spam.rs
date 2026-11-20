@@ -63,44 +63,53 @@ fn host_of_url(url: &str) -> Option<String> {
 }
 
 /// Anchors whose text names one site while their link goes to another.
+/// One pass over at most the first megabyte, at most 2000 anchors.
 fn deceptive_links(html: &str) -> bool {
-    let lower = html.to_ascii_lowercase();
-    let mut rest = lower.as_str();
-    while let Some(start) = rest.find("<a ") {
-        rest = &rest[start..];
-        let Some(href_at) = rest.find("href=") else {
+    let mut end = html.len().min(1024 * 1024);
+    while !html.is_char_boundary(end) {
+        end -= 1;
+    }
+    let lower = html[..end].to_ascii_lowercase();
+    let mut at = 0;
+    for _ in 0..2000 {
+        let Some(found) = lower[at..].find("<a ") else {
             break;
         };
-        let after = &rest[href_at + 5..];
-        let quote = after.chars().next().unwrap_or('"');
-        let href = after
-            .trim_start_matches(['"', '\''])
-            .split(quote)
-            .next()
-            .unwrap_or_default();
-        let Some(close) = rest.find('>') else { break };
-        let Some(end) = rest[close..].find("</a>") else {
+        let start = at + found;
+        let Some(close) = lower[start..].find('>') else {
             break;
         };
-        let text = &rest[close + 1..close + end];
-        if let (Some(shown), Some(target)) = (
-            host_of_url(text).or_else(|| {
-                text.trim().starts_with("www.").then(|| {
-                    text.trim()
-                        .trim_start_matches("www.")
-                        .split('/')
-                        .next()
-                        .unwrap_or_default()
-                        .to_string()
-                })
-            }),
-            host_of_url(href),
-        ) {
+        let tag = &lower[start..start + close];
+        let inside = start + close + 1;
+        let Some(stop) = lower[inside..].find("</a>") else {
+            break;
+        };
+        let text = &lower[inside..inside + stop];
+        at = inside + stop + 4;
+        let Some(href_at) = tag.find("href=") else {
+            continue;
+        };
+        let value = &tag[href_at + 5..];
+        let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'');
+        let href = match quote {
+            Some(q) => value[1..].split(q).next().unwrap_or_default(),
+            None => value.split(char::is_whitespace).next().unwrap_or_default(),
+        };
+        let shown = host_of_url(text).or_else(|| {
+            text.trim().starts_with("www.").then(|| {
+                text.trim()
+                    .trim_start_matches("www.")
+                    .split('/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+        });
+        if let (Some(shown), Some(target)) = (shown, host_of_url(href)) {
             if !shown.is_empty() && shown != target && !target.ends_with(&format!(".{shown}")) {
                 return true;
             }
         }
-        rest = &rest[close + end..];
     }
     false
 }
@@ -310,6 +319,18 @@ mod tests {
         assert!(
             verdict.junk() && verdict.reasons.contains(&"executable_attachment"),
             "{verdict:?}"
+        );
+    }
+
+    #[test]
+    fn many_anchors_take_little_time() {
+        let html = "<a ".repeat(2_000_000);
+        let started = std::time::Instant::now();
+        assert!(!deceptive_links(&html));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
         );
     }
 

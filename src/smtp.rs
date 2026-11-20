@@ -31,8 +31,11 @@ const MAX_RECIPIENTS: usize = 100;
 /// Stands for the report addresses among the recipients (no user id has it).
 const REPORTS: &str = "@reports";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+const HANDSHAKE: Duration = Duration::from_secs(30);
+/// Connections at once on one port.
+const MAX_CONNECTIONS: usize = 1000;
 
-fn max_size() -> usize {
+pub fn max_size() -> usize {
     std::env::var("ORTUS_MAIL_MAX_SIZE")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -147,12 +150,19 @@ pub async fn serve_as(
     let authenticator =
         Arc::new(MessageAuthenticator::new(config, options).map_err(|e| e.to_string())?);
     let tls = tls();
+    let open = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let Ok((socket, peer)) = accepted else { continue };
+                let Ok((socket, peer)) = accepted else {
+                    // Out of file descriptors, say: wait instead of spinning.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                };
+                let Ok(permit) = Arc::clone(&open).try_acquire_owned() else { continue };
                 let (instance, authenticator, tls) = (Arc::clone(&instance), Arc::clone(&authenticator), tls.clone());
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let session = Session::new(instance, authenticator, peer, tls.is_some(), mode);
                     if let Err(e) = session.run(socket, tls).await {
                         eprintln!("ortus: mail: SMTP from {peer}: {e}");
@@ -249,10 +259,13 @@ impl Session {
         let stream: Box<dyn Stream> = match (&self.mode, &tls) {
             // Port 465: TLS from the first byte.
             (Mode::Submission { implicit_tls: true }, Some(config)) => {
-                let accepted = tokio_rustls::TlsAcceptor::from(Arc::clone(config))
-                    .accept(socket)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let accepted = tokio::time::timeout(
+                    HANDSHAKE,
+                    tokio_rustls::TlsAcceptor::from(Arc::clone(config)).accept(socket),
+                )
+                .await
+                .map_err(|_| "the client went away in the TLS handshake".to_string())?
+                .map_err(|e| e.to_string())?;
                 self.secure = true;
                 Box::new(accepted)
             }
@@ -315,10 +328,13 @@ impl Session {
                     // Anything sent before the handshake is dropped (RFC 3207).
                     let plain = reader.into_inner();
                     let config = tls.clone().ok_or("no TLS")?;
-                    let accepted = tokio_rustls::TlsAcceptor::from(config)
-                        .accept(plain)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let accepted = tokio::time::timeout(
+                        HANDSHAKE,
+                        tokio_rustls::TlsAcceptor::from(config).accept(plain),
+                    )
+                    .await
+                    .map_err(|_| "the client went away in the TLS handshake".to_string())?
+                    .map_err(|e| e.to_string())?;
                     reader = BufReader::new(Box::new(accepted));
                     self.secure = true;
                     self.helo = None;
@@ -333,11 +349,14 @@ impl Session {
                 "DATA" => {
                     write(reader.get_mut(), "354 End data with <CR><LF>.<CR><LF>\r\n").await?;
                     let reply = match read_data(&mut reader, max_size()).await? {
-                        Some(message) if matches!(self.mode, Mode::Submission { .. }) => {
+                        Data::Message(message) if matches!(self.mode, Mode::Submission { .. }) => {
                             self.submit(message).await
                         }
-                        Some(message) => self.receive(message).await,
-                        None => "552 5.3.4 Message too big\r\n".to_string(),
+                        Data::Message(message) => self.receive(message).await,
+                        Data::TooBig => "552 5.3.4 Message too big\r\n".to_string(),
+                        Data::BareLf => {
+                            "554 5.6.0 Lines must end in CRLF (bare LF refused)\r\n".to_string()
+                        }
                     };
                     self.reset();
                     reply
@@ -435,6 +454,8 @@ impl Session {
             return "530 5.7.0 Sign in first\r\n".into();
         };
         let to: Vec<String> = self.to.iter().map(|(address, _)| address.clone()).collect();
+        // Bcc never leaves with the message.
+        let message = crate::send::strip_bcc(&message);
         let out = crate::send::Outgoing {
             user: &user,
             from: &from,
@@ -510,7 +531,9 @@ impl Session {
         }
         if matches!(self.mode, Mode::Submission { .. }) {
             // A signed-in app may write to anyone; sending decides the rest.
-            self.to.push((address, String::new()));
+            if !self.to.iter().any(|(a, _)| *a == address) {
+                self.to.push((address, String::new()));
+            }
             return "250 2.1.5 OK\r\n".into();
         }
         let store = self.instance.store.as_ref();
@@ -524,8 +547,20 @@ impl Session {
             return "250 2.1.5 OK\r\n".into();
         }
         match store::recipient(store, &address).await {
+            Ok(Some(user))
+                if store::quota_left(store, &user)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|left| left <= 0) =>
+            {
+                "452 4.2.2 That mailbox is full\r\n".into()
+            }
             Ok(Some(user)) => {
-                self.to.push((address, user));
+                // One copy per person, however many of their addresses it names.
+                if !self.to.iter().any(|(_, u)| *u == user) {
+                    self.to.push((address, user));
+                }
                 "250 2.1.5 OK\r\n".into()
             }
             Ok(None) => {
@@ -626,14 +661,35 @@ impl Session {
             "tls": self.secure,
         });
         let store = self.instance.store.as_ref();
-        let mut delivered = 0;
+        for (_, user) in self.to.iter().filter(|(_, u)| u != REPORTS) {
+            if !store::fits(store, user, message.len())
+                .await
+                .unwrap_or(true)
+            {
+                return "552 5.2.2 A mailbox it is for is full\r\n".into();
+            }
+        }
+        // Everyone gets it, or no one does: a 451 makes the sender try
+        // again, and a partial delivery would then come twice.
+        let mut stored_for: Vec<(String, String)> = Vec::new();
+        let mut not_stored = false;
         let sender = (!header_from.is_empty()).then(|| header_from.clone());
         for (_, user) in &self.to {
             if user == REPORTS {
-                // DMARC and TLS reports are read, not filed.
-                match crate::reports::take(&self.instance, &message).await {
-                    Ok(_) => delivered += 1,
-                    Err(e) => eprintln!("ortus: mail: a report: {e}"),
+                // DMARC and TLS reports are read, not filed, and only when
+                // they really come from who they say (DMARC passed); after
+                // the reply, so the sender does not wait for it.
+                if dmarc_word == "pass" {
+                    let reporter = header_from
+                        .rsplit_once('@')
+                        .map(|(_, d)| d.to_ascii_lowercase())
+                        .unwrap_or_default();
+                    let (instance, message) = (Arc::clone(&self.instance), message.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::reports::take(&instance, &message, &reporter).await {
+                            eprintln!("ortus: mail: a report: {e}");
+                        }
+                    });
                 }
                 continue;
             }
@@ -647,7 +703,8 @@ impl Session {
             };
             let role = if junk || mine.junk() { "junk" } else { "inbox" };
             let Ok(mailbox) = store::by_role(store, user, role).await else {
-                continue;
+                not_stored = true;
+                break;
             };
             let mut copy = mine.header().into_bytes();
             copy.extend_from_slice(&stored);
@@ -662,11 +719,18 @@ impl Session {
             )
             .await
             {
-                Ok(_) => delivered += 1,
-                Err(e) => eprintln!("ortus: mail: delivering to {user}: {e}"),
+                Ok(delivered) => stored_for.push((user.clone(), delivered.message)),
+                Err(e) => {
+                    eprintln!("ortus: mail: delivering to {user}: {e}");
+                    not_stored = true;
+                    break;
+                }
             }
         }
-        if delivered == 0 {
+        if not_stored {
+            for (user, message) in stored_for {
+                let _ = store::remove_message(&self.instance, &user, &message).await;
+            }
             return "451 4.3.0 Could not store the message; try again later\r\n".into();
         }
         "250 2.0.0 OK delivered\r\n".into()
@@ -713,25 +777,66 @@ async fn read_line<R: AsyncRead + Unpin>(
     Ok(Some(String::from_utf8_lossy(&line).into_owned()))
 }
 
-/// The message after DATA, dots unstuffed; `None` when it grew past
-/// `limit` (the rest is read and dropped, so the session can go on).
+/// How DATA ended.
+enum Data {
+    Message(Vec<u8>),
+    TooBig,
+    /// A line ended in a bare LF: refused, so no second message can hide
+    /// in this one (SMTP smuggling).
+    BareLf,
+}
+
+/// The longest line DATA takes (RFC 5321 allows 1000; mail in the wild
+/// goes longer, but not this long).
+const MAX_DATA_LINE: usize = 64 * 1024;
+
+/// The message after DATA, dots unstuffed. Only CRLF.CRLF ends it; a bare
+/// LF anywhere refuses the message. The rest of a message that grew past
+/// `limit` is read and dropped, so the session can go on.
 async fn read_data<R: AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
     limit: usize,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Data, String> {
     let mut message = Vec::new();
     let mut too_big = false;
+    let mut bare_lf = false;
+    // Only CRLF . CRLF ends it: the line before must have ended in CRLF.
+    let mut after_crlf = true;
     loop {
         let mut line = Vec::new();
-        let read = tokio::time::timeout(COMMAND_TIMEOUT, reader.read_until(b'\n', &mut line))
-            .await
-            .map_err(|_| "timed out in DATA")?
-            .map_err(|e| e.to_string())?;
+        // One line, at most MAX_DATA_LINE; a longer one is dropped in parts.
+        let read = tokio::time::timeout(
+            COMMAND_TIMEOUT,
+            tokio::io::AsyncReadExt::take(&mut *reader, MAX_DATA_LINE as u64)
+                .read_until(b'\n', &mut line),
+        )
+        .await
+        .map_err(|_| "timed out in DATA")?
+        .map_err(|e| e.to_string())?;
         if read == 0 {
             return Err("the client went away in DATA".into());
         }
-        if line == b".\r\n" || line == b".\n" {
-            return Ok((!too_big).then_some(message));
+        if !line.ends_with(b"\n") {
+            too_big = true;
+            message.clear();
+            after_crlf = false;
+            continue;
+        }
+        if !line.ends_with(b"\r\n") {
+            bare_lf = true;
+            after_crlf = false;
+            continue;
+        }
+        let ends = after_crlf && line == b".\r\n";
+        after_crlf = true;
+        if ends {
+            return Ok(if bare_lf {
+                Data::BareLf
+            } else if too_big {
+                Data::TooBig
+            } else {
+                Data::Message(message)
+            });
         }
         let line = if line.starts_with(b"..") {
             &line[1..]
@@ -742,7 +847,7 @@ async fn read_data<R: AsyncRead + Unpin>(
             too_big = true;
             message.clear();
         }
-        if !too_big {
+        if !too_big && !bare_lf {
             message.extend_from_slice(line);
         }
     }

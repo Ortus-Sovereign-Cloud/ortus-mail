@@ -6,7 +6,8 @@
 //! opportunistic STARTTLS; temporary failures retried for days, permanent
 //! ones (and the last try) bounced back to the sender.
 //!
-//! `ORTUS_SMTP_OUTBOUND_PORT` changes the remote port (tests only).
+//! `ORTUS_SMTP_OUTBOUND_PORT` changes the remote port and
+//! `ORTUS_SMTP_ALLOW_PRIVATE=1` lets mail go to private addresses (tests only).
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -156,20 +157,39 @@ pub fn strip_bcc(raw: &[u8]) -> Vec<u8> {
     bytes
 }
 
-/// The label a mail app set in an `X-Ortus-Label` header, if any.
-fn label_header(raw: &[u8]) -> Option<String> {
-    let head_end = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .unwrap_or(raw.len());
-    String::from_utf8_lossy(&raw[..head_end])
-        .lines()
-        .find_map(|line| {
-            line.split_once(':')
-                .filter(|(name, _)| name.eq_ignore_ascii_case("X-Ortus-Label"))
-                .map(|(_, v)| v.trim().to_ascii_lowercase())
+/// Every label in a message: `X-Ortus-Label` headers anywhere in it,
+/// folded or not, including forwarded messages inside it.
+pub fn labels_in(raw: &[u8]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(message) = mail_parser::MessageParser::default().parse(raw) {
+        for part in message.parts() {
+            for header in part.headers().all("X-Ortus-Label") {
+                if let Some(text) = header.value().as_text() {
+                    let label = text.trim().to_ascii_lowercase();
+                    if !label.is_empty() && !out.contains(&label) {
+                        out.push(label);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The addresses in a message's From and Sender headers.
+fn from_addresses(raw: &[u8]) -> Vec<String> {
+    let Some(message) = mail_parser::MessageParser::default().parse(raw) else {
+        return Vec::new();
+    };
+    [message.from(), message.sender()]
+        .into_iter()
+        .flatten()
+        .flat_map(|l| {
+            l.mailboxes()
+                .filter_map(|m| m.address().map(str::to_ascii_lowercase))
+                .collect::<Vec<_>>()
         })
-        .filter(|v| !v.is_empty())
+        .collect()
 }
 
 /// Who gets a message: people here (their user ids) and addresses away,
@@ -195,12 +215,34 @@ async fn route(instance: &Instance, out: &Outgoing<'_>, record: bool) -> Result<
     {
         return Err(Refused::NotYourAddress);
     }
+    // The message says who it is from too: every such address must be the
+    // sender's own, or a colleague could be impersonated, signed and all.
+    for address in from_addresses(out.raw) {
+        if store::recipient(store, &address)
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some(out.user)
+        {
+            return Err(Refused::NotYourAddress);
+        }
+    }
     if out.to.is_empty() {
         return Err(Refused::BadRecipient {
             address: String::new(),
         });
     }
-    let header_label = label_header(out.raw);
+    let mut labels: Vec<String> = out
+        .label
+        .map(|l| l.to_ascii_lowercase())
+        .into_iter()
+        .collect();
+    for label in labels_in(out.raw) {
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
     let mut here = Vec::new();
     let mut away: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for address in out.to {
@@ -218,33 +260,41 @@ async fn route(instance: &Instance, out: &Outgoing<'_>, record: bool) -> Result<
         // Only labelled mail is judged (a label chosen in compose, or an
         // X-Ortus-Label header from a mail app): unlabelled mail goes out
         // as mail always has.
-        let Some(label) = out.label.or(header_label.as_deref()) else {
+        if labels.is_empty() {
             away.entry(domain_of(&address)).or_default().push(address);
             continue;
-        };
+        }
+        // Each label in it must let it go there.
         let audience = Audience::Outside(address.clone());
-        let ask = Ask {
-            actor: out.user,
-            action: Action::Share,
-            label: Some(label),
-            audience: &audience,
-            channel: Channel::Mail,
-            object: "mail:outgoing",
-            reason: out.reason,
-        };
-        let decision = if record {
-            policy::decide(instance, &ask).await
-        } else {
-            policy::judge(store, &ask)
-                .await
-                .map(|(decision, _, _)| decision)
+        for label in &labels {
+            let ask = Ask {
+                actor: out.user,
+                action: Action::Share,
+                label: Some(label),
+                audience: &audience,
+                channel: Channel::Mail,
+                object: "mail:outgoing",
+                reason: out.reason,
+            };
+            let decision = if record {
+                policy::decide(instance, &ask).await
+            } else {
+                policy::judge(store, &ask)
+                    .await
+                    .map(|(decision, _, _)| decision)
+            }
+            .map_err(|_| Refused::Failed)?;
+            match decision {
+                Decision::Allow { .. } => {}
+                Decision::NeedsReason { label } => {
+                    return Err(Refused::NeedsReason { address, label })
+                }
+                decision @ Decision::Deny { .. } => {
+                    return Err(Refused::Policy { address, decision })
+                }
+            }
         }
-        .map_err(|_| Refused::Failed)?;
-        match decision {
-            Decision::Allow { .. } => away.entry(domain_of(&address)).or_default().push(address),
-            Decision::NeedsReason { label } => return Err(Refused::NeedsReason { address, label }),
-            decision @ Decision::Deny { .. } => return Err(Refused::Policy { address, decision }),
-        }
+        away.entry(domain_of(&address)).or_default().push(address);
     }
     Ok(Routed { from, here, away })
 }
@@ -274,60 +324,93 @@ pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refus
     )
     .await
     .map_err(|_| Refused::Failed)?;
+    // All or nothing: if anything below fails, what was stored is taken
+    // back and the sender may try again without anyone getting it twice.
+    let mut stored: Vec<(String, String)> = vec![(out.user.to_string(), copy.message.clone())];
+    let undo = |stored: Vec<(String, String)>| async move {
+        for (user, message) in stored {
+            let _ = store::remove_message(instance, &user, &message).await;
+        }
+        Refused::Failed
+    };
     let mut delivered_here = 0;
+    let mut full: Vec<String> = Vec::new();
     for user in &here {
-        if let Ok(inbox) = store::by_role(store, user, "inbox").await {
-            if store::deliver(
-                instance,
-                user,
-                &inbox.id,
-                &signed,
-                &[],
-                Some(&json!({ "internal": true })),
-                0,
-            )
-            .await
-            .is_ok()
-            {
-                delivered_here += 1;
-            }
+        // A colleague whose mailbox is full does not get it; the sender hears.
+        if !store::fits(store, user, signed.len()).await.unwrap_or(true) {
+            full.push(user.clone());
+            continue;
         }
-    }
-    let mut queued = 0;
-    for (domain, recipients) in &away {
-        let job = Delivery {
-            user: out.user.to_string(),
-            message: copy.message.clone(),
-            from: from.clone(),
-            domain: domain.clone(),
-            to: recipients.clone(),
+        let inbox = match store::by_role(store, user, "inbox").await {
+            Ok(inbox) => inbox,
+            Err(_) => return Err(undo(stored).await),
         };
-        let mut tx = store.begin().await.map_err(|_| Refused::Failed)?;
-        for recipient in recipients {
-            tx.execute(
-                "INSERT INTO mail_outbound (id, user_id, message, recipient, domain, state, attempts, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, 'queued', 0, $6, $6)",
-                &[format!("ob_{}", ortus_core::auth::random_hex(12)).into(), out.user.into(), copy.message.as_str().into(), recipient.as_str().into(), domain.as_str().into(), now().into()],
-            )
-            .await
-            .map_err(|_| Refused::Failed)?;
-        }
-        let id = format!("deliver-{}-{domain}", copy.message);
-        let payload = serde_json::to_string(&job).unwrap_or_default();
-        ortus_core::jobs::enqueue_in(
-            &mut *tx,
-            &ortus_core::jobs::NewJob {
-                id: &id,
-                kind: DELIVER_JOB,
-                payload: &payload,
-                run_at: now(),
-                max_attempts: 16,
-            },
-            now(),
+        match store::deliver(
+            instance,
+            user,
+            &inbox.id,
+            &signed,
+            &[],
+            Some(&json!({ "internal": true })),
+            0,
         )
         .await
-        .map_err(|_| Refused::Failed)?;
-        tx.commit().await.map_err(|_| Refused::Failed)?;
-        queued += recipients.len();
+        {
+            Ok(delivered) => {
+                stored.push((user.clone(), delivered.message));
+                delivered_here += 1;
+            }
+            Err(_) => return Err(undo(stored).await),
+        }
+    }
+    // Every outside domain in one transaction.
+    let queued: usize = away.values().map(Vec::len).sum();
+    let queue = async {
+        let mut tx = store.begin().await?;
+        for (domain, recipients) in &away {
+            let job = Delivery { user: out.user.to_string(), message: copy.message.clone(), from: from.clone(), domain: domain.clone(), to: recipients.clone() };
+            for recipient in recipients {
+                tx.execute(
+                    "INSERT INTO mail_outbound (id, user_id, message, recipient, domain, state, attempts, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, 'queued', 0, $6, $6)",
+                    &[format!("ob_{}", ortus_core::auth::random_hex(12)).into(), out.user.into(), copy.message.as_str().into(), recipient.as_str().into(), domain.as_str().into(), now().into()],
+                )
+                .await?;
+            }
+            let id = format!("deliver-{}-{domain}", copy.message);
+            let payload = serde_json::to_string(&job).unwrap_or_default();
+            ortus_core::jobs::enqueue_in(&mut *tx, &ortus_core::jobs::NewJob { id: &id, kind: DELIVER_JOB, payload: &payload, run_at: now(), max_attempts: 16 }, now()).await?;
+        }
+        tx.commit().await
+    }
+    .await;
+    if queue.is_err() {
+        return Err(undo(stored).await);
+    }
+    if !full.is_empty() {
+        let mut names = Vec::new();
+        for user in &full {
+            if let Ok(Some(u)) = ortus_core::auth::accounts::by_id(store, user).await {
+                names.push(u.email);
+            }
+        }
+        let domain = domain_of(&from);
+        let note = format!(
+            "From: Mail Delivery <postmaster@{domain}>\r\nTo: <{from}>\r\nSubject: Not delivered: mailbox full\r\nMessage-ID: <full-{}@{domain}>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nYour message could not be delivered to {} because the mailbox is full.\r\n",
+            ortus_core::auth::random_hex(8),
+            names.join(", ")
+        );
+        if let Ok(inbox) = store::by_role(store, out.user, "inbox").await {
+            let _ = store::deliver(
+                instance,
+                out.user,
+                &inbox.id,
+                note.as_bytes(),
+                &[],
+                Some(&json!({ "internal": true, "bounce": true })),
+                0,
+            )
+            .await;
+        }
     }
     Ok(Sent {
         message: copy.message,
@@ -371,17 +454,59 @@ async fn exchangers(domain: &str) -> Result<Vec<(String, IpAddr)>, String> {
     }
     hosts.sort();
     let mut out = Vec::new();
+    let inside_allowed = std::env::var("ORTUS_SMTP_ALLOW_PRIVATE").is_ok_and(|v| v == "1");
+    let mut refused_inside = false;
     for (_, host) in hosts {
         if let Ok(ips) = resolver.lookup_ip(format!("{host}.")).await {
-            if let Some(ip) = ips.iter().next() {
-                out.push((host, ip));
+            // Never into our own network: a domain whose MX points at a
+            // private address would make us talk to servers there.
+            match ips.iter().find(|ip| inside_allowed || public(*ip)) {
+                Some(ip) => out.push((host, ip)),
+                None => refused_inside |= ips.iter().next().is_some(),
             }
         }
     }
     if out.is_empty() {
-        return Err(format!("no address for the mail servers of {domain}"));
+        return Err(if refused_inside {
+            format!("the mail servers of {domain} are on a private network")
+        } else {
+            format!("no address for the mail servers of {domain}")
+        });
     }
     Ok(out)
+}
+
+/// Whether an address is on the public internet (not loopback, private,
+/// link-local, shared, documentation, multicast or unspecified).
+pub fn public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || a == 0
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 198 && (b == 18 || b == 19))
+                || a >= 240)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return public(IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+                || first == 0x2001 && v6.segments()[1] == 0x0db8)
+        }
+    }
 }
 
 /// Whether a delivery error is permanent (5xx).

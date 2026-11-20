@@ -192,6 +192,16 @@ pub const MIGRATIONS: &[Migration] = &[
         PRIMARY KEY (account, folder, validity, uid)
     )",
     },
+    Migration {
+        version: 8,
+        name: "uploads waiting to be used",
+        sql: "CREATE TABLE mail_uploads (
+        blob TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at BIGINT NOT NULL
+    );
+    CREATE INDEX mail_uploads_created ON mail_uploads (created_at)",
+    },
 ];
 
 /// The mailboxes everyone has, by role, with their IMAP names.
@@ -777,7 +787,19 @@ pub async fn forget(tx: &mut dyn AsyncTx, user_id: &str) -> StoreResult<Vec<Stri
         .iter()
         .filter_map(|r| r.text(0).map(str::to_string))
         .collect();
+    let uploads: Vec<String> = tx
+        .query(
+            "SELECT blob FROM mail_uploads WHERE user_id = $1",
+            &[user_id.into()],
+        )
+        .await?
+        .iter()
+        .filter_map(|r| r.text(0).map(str::to_string))
+        .collect();
+    let mut blobs = blobs;
+    blobs.extend(uploads);
     for sql in [
+        "DELETE FROM mail_uploads WHERE user_id = $1",
         "DELETE FROM mail_entries WHERE mailbox_id IN (SELECT id FROM mail_mailboxes WHERE user_id = $1)",
         "DELETE FROM mail_messages WHERE user_id = $1",
         "DELETE FROM mail_mailboxes WHERE user_id = $1",
@@ -801,7 +823,7 @@ pub async fn forget(tx: &mut dyn AsyncTx, user_id: &str) -> StoreResult<Vec<Stri
 pub async fn purge(tx: &mut dyn AsyncTx, rules: &ortus_core::retention::Rules) -> StoreResult<u64> {
     let rows = tx
         .query(
-            "SELECT b.user_id, e.mailbox_id, e.uid, m.received_at, b.role FROM mail_entries e JOIN mail_messages m ON m.id = e.message JOIN mail_mailboxes b ON b.id = e.mailbox_id",
+            "SELECT b.user_id, e.mailbox_id, e.uid, m.received_at, b.role FROM mail_entries e JOIN mail_messages m ON m.id = e.message JOIN mail_mailboxes b ON b.id = e.mailbox_id ORDER BY m.received_at LIMIT 200000",
             &[],
         )
         .await?;
@@ -821,6 +843,11 @@ pub async fn purge(tx: &mut dyn AsyncTx, rules: &ortus_core::retention::Rules) -
         };
         if rules.may_purge(kind, at, &[user], None) && seen.insert((mailbox.to_string(), uid)) {
             doomed.push((mailbox.to_string(), uid));
+        }
+        // One sweep holds the write lock for a bounded time; the next one
+        // (daily) goes on with the rest, oldest first.
+        if doomed.len() >= 20_000 {
+            break;
         }
     }
     let mut blobs = Vec::new();
@@ -1211,9 +1238,20 @@ pub async fn wake_due(instance: &Instance) -> Result<(), String> {
         let inbox = by_role(store, &user, "inbox")
             .await
             .map_err(|e| e.to_string())?;
-        if move_message(instance, &user, &message, &inbox.id)
+        // Only what still waits in Snoozed comes back; mail the person has
+        // moved on in the meantime stays where they put it.
+        let still_snoozed = !store
+            .query(
+                "SELECT e.uid FROM mail_entries e JOIN mail_mailboxes b ON b.id = e.mailbox_id WHERE e.message = $1 AND b.user_id = $2 AND b.role = 'snoozed'",
+                &[message.as_str().into(), user.as_str().into()],
+            )
             .await
             .map_err(|e| e.to_string())?
+            .is_empty();
+        if still_snoozed
+            && move_message(instance, &user, &message, &inbox.id)
+                .await
+                .map_err(|e| e.to_string())?
         {
             for entry in store
                 .query(
@@ -1235,6 +1273,88 @@ pub async fn wake_due(instance: &Instance) -> Result<(), String> {
             }
         }
         unsnooze(store, &user, &message)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Removes a person's message from every mailbox it is in (undoing a
+/// delivery that could not be completed for everyone).
+pub async fn remove_message(instance: &Instance, user_id: &str, message: &str) -> StoreResult<()> {
+    let entries = instance
+        .store
+        .query(
+            "SELECT e.mailbox_id, e.uid FROM mail_entries e JOIN mail_mailboxes b ON b.id = e.mailbox_id WHERE e.message = $1 AND b.user_id = $2",
+            &[message.into(), user_id.into()],
+        )
+        .await?;
+    for e in entries {
+        expunge(
+            instance,
+            e.text(0).unwrap_or_default(),
+            e.int(1).unwrap_or(0),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// How many more bytes of mail a person may keep: `None` when they have
+/// no quota.
+pub async fn quota_left(store: &dyn AsyncStore, user_id: &str) -> StoreResult<Option<i64>> {
+    let quota = store
+        .query(
+            "SELECT quota_bytes FROM core_users WHERE id = $1",
+            &[user_id.into()],
+        )
+        .await?
+        .first()
+        .and_then(|r| r.int(0));
+    let Some(quota) = quota else { return Ok(None) };
+    Ok(Some(quota - usage(store, user_id).await?))
+}
+
+/// Whether `size` more bytes fit in the person's quota.
+pub async fn fits(store: &dyn AsyncStore, user_id: &str, size: usize) -> StoreResult<bool> {
+    Ok(quota_left(store, user_id)
+        .await?
+        .is_none_or(|left| left >= size as i64))
+}
+
+/// The job that removes uploads nobody used within a day.
+pub const UPLOADS_JOB: &str = "mail.uploads";
+
+/// Remembers an upload of `user_id`'s (its file is at `path`).
+pub async fn track_upload(store: &dyn AsyncStore, user_id: &str, path: &str) -> StoreResult<()> {
+    store
+        .execute("INSERT INTO mail_uploads (blob, user_id, created_at) VALUES ($1, $2, $3) ON CONFLICT (blob) DO NOTHING", &[path.into(), user_id.into(), now().into()])
+        .await
+        .map(|_| ())
+}
+
+/// An upload is used (imported) or gone: forget it, and its file.
+pub async fn drop_upload(instance: &Instance, path: &str) -> StoreResult<()> {
+    instance
+        .store
+        .execute("DELETE FROM mail_uploads WHERE blob = $1", &[path.into()])
+        .await?;
+    let _ = instance.files.delete(path).await;
+    Ok(())
+}
+
+/// Removes uploads older than a day.
+pub async fn sweep_uploads(instance: &Instance) -> Result<(), String> {
+    let old = instance
+        .store
+        .query(
+            "SELECT blob FROM mail_uploads WHERE created_at < $1 LIMIT 10000",
+            &[(now() - 86_400_000).into()],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    for r in old {
+        drop_upload(instance, r.text(0).unwrap_or_default())
             .await
             .map_err(|e| e.to_string())?;
     }

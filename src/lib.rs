@@ -123,6 +123,8 @@ impl App for Mail {
         vec![
             (domains::CHECK_JOB, 10 * 60 * 1000),
             (store::WAKE_JOB, 60 * 1000),
+            (import::IMPORT_WATCH_JOB, 5 * 60 * 1000),
+            (store::UPLOADS_JOB, 60 * 60 * 1000),
         ]
     }
 
@@ -192,6 +194,26 @@ impl App for Mail {
                 handler: Box::new(move |job| {
                     let instance = Arc::clone(&import);
                     Box::pin(async move { import::run(&instance, job).await })
+                }),
+            },
+            OutsideJobKind {
+                kind: store::UPLOADS_JOB.into(),
+                handler: Box::new({
+                    let instance = Arc::clone(instance);
+                    move |_| {
+                        let instance = Arc::clone(&instance);
+                        Box::pin(async move { store::sweep_uploads(&instance).await })
+                    }
+                }),
+            },
+            OutsideJobKind {
+                kind: import::IMPORT_WATCH_JOB.into(),
+                handler: Box::new({
+                    let instance = Arc::clone(instance);
+                    move |_| {
+                        let instance = Arc::clone(&instance);
+                        Box::pin(async move { import::watch(&instance).await })
+                    }
                 }),
             },
             OutsideJobKind {

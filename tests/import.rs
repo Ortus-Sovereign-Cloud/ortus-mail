@@ -57,6 +57,20 @@ fn run_queued(instance: &Arc<ortus_core::instance::Instance>) {
         ))
         .unwrap();
     }
+    // The copying goes on in the background: wait until it settles.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        let busy = block_on(instance.store.query(
+            "SELECT id FROM mail_import_accounts WHERE state IN ('queued', 'running')",
+            &[],
+        ))
+        .unwrap();
+        if busy.is_empty() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the import did not finish");
 }
 
 #[test]

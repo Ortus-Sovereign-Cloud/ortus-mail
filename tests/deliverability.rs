@@ -37,6 +37,9 @@ fn reports_and_outbound_numbers() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let dns = Dns::start();
     dns.a("mail.ministry.example", "192.0.2.10".parse().unwrap());
+    // Reports are read only from who they say they are from.
+    dns.txt("google.com", &["v=spf1 ip4:127.0.0.1 -all"]);
+    dns.txt("_dmarc.google.com", &["v=DMARC1; p=reject"]);
     unsafe {
         std::env::set_var("ORTUS_DNS_SERVERS", dns.addr.to_string());
         std::env::set_var("ORTUS_MAIL_HOSTNAME", "mail.ministry.example");
@@ -88,10 +91,24 @@ fn reports_and_outbound_numbers() {
         writer.write_all(report.as_bytes()).unwrap();
         let reply = talk(&mut reader, &mut writer, ".");
         assert!(reply.starts_with("250"), "{name}: {reply}");
+        // It is read after the reply.
+        let count = || {
+            block_on(instance.store.query(
+                "SELECT CAST(COUNT(*) AS BIGINT) FROM mail_dmarc_reports",
+                &[],
+            ))
+            .unwrap()[0]
+                .int(0)
+                .unwrap()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while count() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         // The same report again is not counted twice.
         assert_eq!(
             0,
-            block_on(reports::take(&instance, report.as_bytes())).unwrap()
+            block_on(reports::take(&instance, report.as_bytes(), "google.com")).unwrap()
         );
         assert_eq!(
             1,

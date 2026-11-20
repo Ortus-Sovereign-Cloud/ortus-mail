@@ -71,7 +71,9 @@ fn mail_goes_out_signed_and_comes_back_when_it_cannot() {
         std::env::set_var(
             "ORTUS_SMTP_OUTBOUND_PORT",
             listener.local_addr().unwrap().port().to_string(),
-        )
+        );
+        // The other installation is on this machine.
+        std::env::set_var("ORTUS_SMTP_ALLOW_PRIVATE", "1");
     };
     let (_stop, mut stop) = tokio::sync::watch::channel(false);
     let server = Arc::clone(&b);

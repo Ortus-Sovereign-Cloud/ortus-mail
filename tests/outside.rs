@@ -55,6 +55,8 @@ fn mail_goes_both_ways_with_an_outside_server() {
         std::env::set_var("ORTUS_DNS_SERVERS", dns.addr.to_string());
         std::env::set_var("ORTUS_MAIL_HOSTNAME", "mail.ministry.example");
         std::env::set_var("ORTUS_SMTP_OUTBOUND_PORT", "2525");
+        // The outside server is on this machine.
+        std::env::set_var("ORTUS_SMTP_ALLOW_PRIVATE", "1");
     }
     for (name, instance, _keep) in common::installations() {
         signed_in(&instance, "olena@ministry.example", Role::Member);

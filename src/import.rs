@@ -26,6 +26,8 @@ pub const IMPORT_JOB: &str = "mail.import";
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
+/// One answer from the old server, literals and all.
+const MAX_RESPONSE: usize = 128 * 1024 * 1024;
 
 fn now() -> i64 {
     ortus_core::program::now_ms()
@@ -112,20 +114,30 @@ impl Client {
     /// Reads one response line and any literals in it.
     async fn line(&mut self) -> Result<Line, String> {
         let mut text = String::new();
-        let mut literals = Vec::new();
+        let mut literals: Vec<Vec<u8>> = Vec::new();
+        let mut total = 0usize;
         loop {
+            // A line may be long (a big SEARCH answer): read it all, in parts.
             let mut part = Vec::new();
-            let read = tokio::time::timeout(
-                TIMEOUT,
-                (&mut self.reader)
-                    .take(1 << 20)
-                    .read_until(b'\n', &mut part),
-            )
-            .await
-            .map_err(|_| "timeout".to_string())?
-            .map_err(|_| "connection_lost".to_string())?;
-            if read == 0 {
-                return Err("connection_lost".into());
+            loop {
+                let read = tokio::time::timeout(
+                    TIMEOUT,
+                    (&mut self.reader)
+                        .take(1 << 20)
+                        .read_until(b'\n', &mut part),
+                )
+                .await
+                .map_err(|_| "timeout".to_string())?
+                .map_err(|_| "connection_lost".to_string())?;
+                if read == 0 {
+                    return Err("connection_lost".into());
+                }
+                if part.len() > MAX_RESPONSE {
+                    return Err("response_too_big".into());
+                }
+                if part.ends_with(b"\n") {
+                    break;
+                }
             }
             let part = String::from_utf8_lossy(&part)
                 .trim_end_matches(['\r', '\n'])
@@ -133,19 +145,27 @@ impl Client {
             let size = part
                 .strip_suffix('}')
                 .and_then(|p| p.rsplit_once('{'))
-                .and_then(|(_, n)| n.parse::<usize>().ok());
+                .and_then(|(_, n)| n.trim_end_matches('+').parse::<usize>().ok());
             text.push_str(&part);
             let Some(size) = size else {
                 return Ok(Line { text, literals });
             };
-            if size > MAX_MESSAGE {
+            total = total.saturating_add(size);
+            if size > MAX_MESSAGE || total > MAX_RESPONSE {
                 return Err("message_too_big".into());
             }
-            let mut data = vec![0u8; size];
-            tokio::time::timeout(TIMEOUT, self.reader.read_exact(&mut data))
-                .await
-                .map_err(|_| "timeout".to_string())?
-                .map_err(|_| "connection_lost".to_string())?;
+            // Read as it comes, not allocated up front.
+            let mut data = Vec::new();
+            tokio::time::timeout(
+                TIMEOUT,
+                (&mut self.reader).take(size as u64).read_to_end(&mut data),
+            )
+            .await
+            .map_err(|_| "timeout".to_string())?
+            .map_err(|_| "connection_lost".to_string())?;
+            if data.len() != size {
+                return Err("connection_lost".into());
+            }
             literals.push(data);
             text.push('\u{0}');
         }
@@ -164,7 +184,13 @@ impl Client {
             .flush()
             .await
             .map_err(|_| "connection_lost".to_string())?;
+        self.answer(&tag, command).await
+    }
+
+    /// The untagged lines of a command, up to its tagged answer.
+    async fn answer(&mut self, tag: &str, command: &str) -> Result<Vec<Line>, String> {
         let mut lines = Vec::new();
+        let mut size = 0usize;
         loop {
             let line = self.line().await?;
             if let Some(rest) = line.text.strip_prefix(&format!("{tag} ")) {
@@ -179,8 +205,62 @@ impl Client {
                     ))
                 };
             }
+            size = size.saturating_add(
+                line.text.len() + line.literals.iter().map(Vec::len).sum::<usize>(),
+            );
+            if size > MAX_RESPONSE || lines.len() > 1_000_000 {
+                return Err("response_too_big".into());
+            }
             lines.push(line);
         }
+    }
+
+    /// Signs in: AUTHENTICATE PLAIN when the server offers it (any
+    /// characters in the password), else LOGIN (plain ASCII only).
+    async fn sign_in(&mut self, login: &str, password: &str) -> Result<(), String> {
+        use base64::Engine;
+        let caps = self
+            .command("CAPABILITY")
+            .await?
+            .iter()
+            .map(|l| l.text.to_ascii_uppercase())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if caps.contains("AUTH=PLAIN") {
+            let response =
+                base64::engine::general_purpose::STANDARD.encode(format!("\0{login}\0{password}"));
+            self.tag += 1;
+            let tag = format!("i{}", self.tag);
+            let writer = self.reader.get_mut();
+            writer
+                .write_all(format!("{tag} AUTHENTICATE PLAIN\r\n").as_bytes())
+                .await
+                .map_err(|_| "connection_lost".to_string())?;
+            writer
+                .flush()
+                .await
+                .map_err(|_| "connection_lost".to_string())?;
+            let first = self.line().await?;
+            if !first.text.starts_with('+') {
+                return Err("login_failed".into());
+            }
+            let writer = self.reader.get_mut();
+            writer
+                .write_all(format!("{response}\r\n").as_bytes())
+                .await
+                .map_err(|_| "connection_lost".to_string())?;
+            writer
+                .flush()
+                .await
+                .map_err(|_| "connection_lost".to_string())?;
+            return self.answer(&tag, "AUTHENTICATE").await.map(|_| ());
+        }
+        if !login.is_ascii() || !password.is_ascii() {
+            return Err("password_not_ascii".into());
+        }
+        self.command(&format!("LOGIN {} {}", quoted(login), quoted(password)))
+            .await
+            .map(|_| ())
     }
 }
 
@@ -343,7 +423,7 @@ async fn queue(tx: &mut dyn ortus_core::storage::AsyncTx, account: &str) -> Stor
 
 /// Runs the import of one account (the job). Failures are recorded on the
 /// account; the job itself does not retry (an administrator does).
-pub async fn run(instance: &Instance, job: &Job) -> Result<(), String> {
+pub async fn run(instance: &Arc<Instance>, job: &Job) -> Result<(), String> {
     let payload: Value = serde_json::from_str(&job.payload).map_err(|e| e.to_string())?;
     let account = payload["account"].as_str().unwrap_or_default().to_string();
     let store = instance.store.as_ref();
@@ -384,27 +464,66 @@ pub async fn run(instance: &Instance, job: &Job) -> Result<(), String> {
         return set("failed", Some("password_unreadable".into())).await;
     };
     ortus_core::outbound::note(store, "mail_import", &host).await;
-    match copy_account(
-        instance,
-        &account,
-        &login,
-        &password,
-        &target,
-        &host,
-        port as u16,
-        &security,
-    )
-    .await
-    {
-        Ok(()) => {
-            store
-                .execute("UPDATE mail_import_accounts SET state = 'done', error = NULL, password = NULL, updated_at = $1 WHERE id = $2", &[now().into(), account.as_str().into()])
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(())
+    // The copy runs on its own: one account can take hours, and the job
+    // runner has other work (outgoing mail) waiting.
+    let instance = Arc::clone(instance);
+    tokio::spawn(async move {
+        let result = copy_account(
+            &instance,
+            &account,
+            &login,
+            &password,
+            &target,
+            &host,
+            port as u16,
+            &security,
+        )
+        .await;
+        let store = instance.store.as_ref();
+        let (state, error, forget) = match result {
+            Ok(()) => ("done", None, true),
+            Err(e) => ("failed", Some(e), false),
+        };
+        let sql = if forget {
+            "UPDATE mail_import_accounts SET state = $1, error = $2, password = NULL, updated_at = $3 WHERE id = $4"
+        } else {
+            "UPDATE mail_import_accounts SET state = $1, error = $2, updated_at = $3 WHERE id = $4"
+        };
+        if let Err(e) = store
+            .execute(
+                sql,
+                &[
+                    state.into(),
+                    error.into(),
+                    now().into(),
+                    account.as_str().into(),
+                ],
+            )
+            .await
+        {
+            eprintln!("ortus: mail: import {account}: {e}");
         }
-        Err(e) => set("failed", Some(e)).await,
-    }
+    });
+    Ok(())
+}
+
+/// The job that notices imports that stopped (the program restarted in
+/// the middle): they fail, so they can be retried.
+pub const IMPORT_WATCH_JOB: &str = "mail.import-watch";
+
+/// An import that copied nothing for this long has stopped.
+const STALLED: i64 = 15 * 60 * 1000;
+
+pub async fn watch(instance: &Instance) -> Result<(), String> {
+    instance
+        .store
+        .execute(
+            "UPDATE mail_import_accounts SET state = 'failed', error = 'interrupted' WHERE state = 'running' AND updated_at < $1",
+            &[(now() - STALLED).into()],
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -420,14 +539,19 @@ async fn copy_account(
 ) -> Result<(), String> {
     let store = instance.store.as_ref();
     let mut client = Client::connect(host, port, security).await?;
-    client
-        .command(&format!("LOGIN {} {}", quoted(login), quoted(password)))
-        .await?;
+    client.sign_in(login, password).await?;
     let folders: Vec<(String, Option<String>)> = client
         .command("LIST \"\" \"*\"")
         .await?
         .iter()
-        .filter_map(|l| parse_list(&l.text))
+        .filter_map(|l| {
+            // A name the server sent as a literal.
+            let (name_literal, text) = (l.literals.first(), &l.text);
+            parse_list(text).map(|(name, special)| match (name.as_str(), name_literal) {
+                ("\u{0}", Some(bytes)) => (String::from_utf8_lossy(bytes).into_owned(), special),
+                _ => (name, special),
+            })
+        })
         .collect();
     for (name, special) in folders {
         // Our folder for it: a role's, or one of the person's own by name.
@@ -598,6 +722,13 @@ async fn start(request: &Request, instance: &Arc<Instance>) -> Result<Response, 
         if a.login.trim().is_empty() || a.password.is_empty() {
             return Err(bad("Every account needs its login and password."));
         }
+        if a.login
+            .chars()
+            .chain(a.password.chars())
+            .any(char::is_control)
+        {
+            return Err(bad("A login or password has a control character in it."));
+        }
         targets.push(user.id);
     }
     let id = format!("im_{}", ortus_core::auth::random_hex(12));
@@ -646,6 +777,13 @@ async fn retry(
     let input: Retry = body(request)?;
     let store = instance.store.as_ref();
     let mut tx = store.begin().await?;
+    if input
+        .password
+        .as_deref()
+        .is_some_and(|p| p.chars().any(char::is_control))
+    {
+        return Err(bad("A password has a control character in it."));
+    }
     let changed = match input.password.filter(|p| !p.is_empty()) {
         Some(p) => tx.execute("UPDATE mail_import_accounts SET state = 'queued', error = NULL, password = $1, updated_at = $2 WHERE id = $3 AND state = 'failed'", &[instance.keys.seal_text(&p).into(), now().into(), account.into()]).await?,
         None => tx.execute("UPDATE mail_import_accounts SET state = 'queued', error = NULL, updated_at = $1 WHERE id = $2 AND state = 'failed' AND password IS NOT NULL", &[now().into(), account.into()]).await?,
@@ -785,7 +923,10 @@ async fn retry_mine(
         .ok_or_else(ApiError::sign_in)?;
     let account = params.get("account").unwrap_or_default();
     let input: Retry = body(request)?;
-    let Some(password) = input.password.filter(|p| !p.is_empty()) else {
+    let Some(password) = input
+        .password
+        .filter(|p| !p.is_empty() && !p.chars().any(char::is_control))
+    else {
         return Err(bad("Give the old server's password."));
     };
     let mut tx = instance.store.begin().await?;

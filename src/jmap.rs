@@ -95,35 +95,41 @@ impl Ctx<'_> {
     }
 }
 
-/// The state of a person's mail: changes whenever anything in it does.
+/// The state of a person's mail: changes whenever anything in it does
+/// (folders, their names and sequences, messages, snoozes).
 pub async fn state(
     instance: &Instance,
     user_id: &str,
 ) -> Result<String, ortus_core::storage::StoreError> {
+    use std::hash::{Hash, Hasher};
     let store = instance.store.as_ref();
     store::mailboxes(store, user_id).await?;
-    let rows = store
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for r in store
         .query(
-            "SELECT CAST(COUNT(*) AS BIGINT), CAST(COALESCE(SUM(uid_next), 0) AS BIGINT), CAST(COALESCE(SUM(modseq), 0) AS BIGINT), CAST(COALESCE(SUM(LENGTH(name)), 0) AS BIGINT) FROM mail_mailboxes WHERE user_id = $1",
+            "SELECT id, name, modseq, uid_next FROM mail_mailboxes WHERE user_id = $1 ORDER BY id",
             &[user_id.into()],
         )
-        .await?;
-    let entries = store
+        .await?
+    {
+        (r.text(0), r.text(1), r.int(2), r.int(3)).hash(&mut h);
+    }
+    for r in store
+        .query("SELECT CAST(COUNT(*) AS BIGINT) FROM mail_entries e JOIN mail_mailboxes m ON m.id = e.mailbox_id WHERE m.user_id = $1", &[user_id.into()])
+        .await?
+    {
+        r.int(0).hash(&mut h);
+    }
+    for r in store
         .query(
-            "SELECT CAST(COUNT(*) AS BIGINT) FROM mail_entries e JOIN mail_mailboxes m ON m.id = e.mailbox_id WHERE m.user_id = $1",
+            "SELECT message, until FROM mail_snoozed WHERE user_id = $1 ORDER BY message",
             &[user_id.into()],
         )
-        .await?;
-    let r = rows.first();
-    let n = |i: usize| r.and_then(|r| r.int(i)).unwrap_or(0);
-    Ok(format!(
-        "{}-{}-{}-{}-{}",
-        n(0),
-        n(1),
-        n(2),
-        n(3),
-        entries.first().and_then(|r| r.int(0)).unwrap_or(0)
-    ))
+        .await?
+    {
+        (r.text(0), r.int(1)).hash(&mut h);
+    }
+    Ok(format!("{:016x}", h.finish()))
 }
 
 // --- Mailbox ---
@@ -271,8 +277,24 @@ async fn mailbox_set(
     }
     let mut destroyed = Vec::new();
     let mut not_destroyed = Map::new();
+    // A folder with mail goes only when the app says its mail may go too.
+    let remove_emails = args
+        .get("onDestroyRemoveEmails")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     for id in ids_arg(args, "destroy")?.unwrap_or_default() {
+        let has_mail = !ctx
+            .store()
+            .query(
+                "SELECT uid FROM mail_entries WHERE mailbox_id = $1 LIMIT 1",
+                &[id.as_str().into()],
+            )
+            .await?
+            .is_empty();
         match boxes.iter().find(|m| m.id == id) {
+            Some(m) if m.role.is_none() && has_mail && !remove_emails => {
+                not_destroyed.insert(id, json!({"type": "mailboxHasEmail"}));
+            }
             Some(m)
                 if m.role.is_none()
                     && store::delete_mailbox(ctx.store(), &ctx.user.id, &m.name).await? =>
@@ -766,8 +788,17 @@ async fn email_query(ctx: &Ctx<'_>, args: &Value) -> Answer {
         .unwrap_or(false);
     let mut seen_threads = HashSet::new();
     let mut hits = Vec::new();
+    // Reading message files is slow (S3): a body search looks through the
+    // newest messages only.
+    let mut bodies_left = 1000usize;
     for s in &all {
         let (from, recipients) = info.get(&s.id).cloned().unwrap_or_default();
+        if needs_body {
+            if bodies_left == 0 {
+                break;
+            }
+            bodies_left -= 1;
+        }
         let text = if needs_body {
             let raw = ctx
                 .instance
@@ -1113,6 +1144,27 @@ async fn compose(ctx: &Ctx<'_>, email: &Value) -> Result<Vec<u8>, Value> {
         return Ok(format!("{head}{body}").into_bytes());
     }
     use base64::Engine;
+    // A part taken from a labelled message keeps its label.
+    let mut inherited: Vec<String> = Vec::new();
+    for file in &files {
+        let blob = file
+            .get("blobId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !blob.starts_with("u_") {
+            let message = blob.split('.').next().unwrap_or_default();
+            if let Ok(Some(raw)) = store::raw(ctx.instance, &ctx.user.id, message).await {
+                for label in send::labels_in(&raw) {
+                    if !inherited.contains(&label) {
+                        inherited.push(label);
+                    }
+                }
+            }
+        }
+    }
+    for label in &inherited {
+        head.push_str(&format!("X-Ortus-Label: {label}\r\n"));
+    }
     let b = format!("mix{}", ortus_core::auth::random_hex(8));
     let mut out =
         format!("{head}Content-Type: multipart/mixed; boundary=\"{b}\"\r\n\r\n--{b}\r\n{body}");
@@ -1196,6 +1248,15 @@ async fn store_new(
     keywords: &[String],
 ) -> Result<(String, String), Value> {
     let fail = |_| json!({"type": "serverFail"});
+    if raw.len() > crate::smtp::max_size() {
+        return Err(json!({"type": "tooLarge"}));
+    }
+    if !store::fits(ctx.store(), &ctx.user.id, raw.len())
+        .await
+        .map_err(fail)?
+    {
+        return Err(json!({"type": "overQuota"}));
+    }
     let flags: Vec<String> = keywords.iter().map(|k| flag_of(k)).collect();
     let flag_refs: Vec<&str> = flags.iter().map(String::as_str).collect();
     let delivered = store::deliver(
@@ -1382,7 +1443,7 @@ async fn email_import(
             }
             let (id, thread) = store_new(ctx, &raw, &mailboxes, &keywords).await?;
             if let Some(path) = upload_path(&ctx.user.id, blob) {
-                let _ = ctx.instance.files.delete(&path).await;
+                let _ = store::drop_upload(ctx.instance, &path).await;
             }
             Ok::<_, Value>(json!({"id": id, "blobId": id, "threadId": thread, "size": raw.len()}))
         }
@@ -2049,6 +2110,7 @@ fn h_upload(
                 eprintln!("ortus: mail: jmap upload: {e}");
                 ApiError::internal()
             })?;
+            store::track_upload(instance.store.as_ref(), &user.id, &path).await?;
             let kind = request
                 .header("content-type")
                 .map(|h| h.value.to_string())

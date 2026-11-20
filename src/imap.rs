@@ -24,6 +24,11 @@ const MAX_LINE: usize = 16_384;
 const MAX_LITERAL: usize = 64 * 1024 * 1024;
 const IDLE_CHECK: Duration = Duration::from_secs(5);
 const INACTIVITY: Duration = Duration::from_secs(30 * 60);
+/// Connections at once on one port.
+const MAX_CONNECTIONS: usize = 1000;
+/// A command, literals included, before signing in.
+const MAX_BEFORE_SIGN_IN: usize = 64 * 1024;
+const HANDSHAKE: Duration = Duration::from_secs(30);
 
 trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
@@ -66,12 +71,19 @@ pub async fn serve(
     implicit_tls: bool,
 ) -> Result<(), String> {
     let tls = crate::smtp::tls_config();
+    let open = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let Ok((socket, peer)) = accepted else { continue };
+                let Ok((socket, peer)) = accepted else {
+                    // Out of file descriptors, say: wait instead of spinning.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                };
+                let Ok(permit) = Arc::clone(&open).try_acquire_owned() else { continue };
                 let (instance, tls) = (Arc::clone(&instance), tls.clone());
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = Session::new(instance, peer, tls).run(socket, implicit_tls).await {
                         if !e.contains("went away") && !e.contains("close_notify") {
                             eprintln!("ortus: mail: IMAP from {peer}: {e}");
@@ -112,9 +124,10 @@ impl Token {
     }
 }
 
-/// Reads one command (a line, with any literals in it) as raw bytes.
-/// Literals `{n}` are acknowledged with a continuation, `{n+}` are not.
-async fn read_command(reader: &mut Reader) -> Result<Option<Vec<u8>>, String> {
+/// Reads one command (a line, with any literals in it) as raw bytes, at
+/// most `limit` bytes in all. Literals `{n}` are acknowledged with a
+/// continuation, `{n+}` are not.
+async fn read_command(reader: &mut Reader, limit: usize) -> Result<Option<Vec<u8>>, String> {
     let mut command = Vec::new();
     loop {
         let mut line = Vec::new();
@@ -148,7 +161,7 @@ async fn read_command(reader: &mut Reader) -> Result<Option<Vec<u8>>, String> {
         let Some((size, plus)) = literal else {
             return Ok(Some(command));
         };
-        if size > MAX_LITERAL {
+        if size > MAX_LITERAL || command.len().saturating_add(size) > limit {
             return Err("literal too big".into());
         }
         if !plus {
@@ -159,13 +172,16 @@ async fn read_command(reader: &mut Reader) -> Result<Option<Vec<u8>>, String> {
                 .map_err(|e| e.to_string())?;
             reader.get_mut().flush().await.map_err(|e| e.to_string())?;
         }
-        let mut data = vec![0u8; size];
-        reader
-            .read_exact(&mut data)
+        command.extend_from_slice(b"\r\n");
+        let before = command.len();
+        (&mut *reader)
+            .take(size as u64)
+            .read_to_end(&mut command)
             .await
             .map_err(|e| e.to_string())?;
-        command.extend_from_slice(b"\r\n");
-        command.extend_from_slice(&data);
+        if command.len() - before != size {
+            return Err("the client went away".into());
+        }
     }
 }
 
@@ -221,7 +237,7 @@ fn tokens(input: &[u8]) -> Result<Vec<Token>, String> {
                         .and_then(|n| n.trim_end_matches('+').parse().ok())
                         .ok_or("bad literal")?;
                     let start = close + 3; // }\r\n
-                    let end = start + size;
+                    let end = start.checked_add(size).ok_or("bad literal")?;
                     if end > input.len() {
                         return Err("short literal".into());
                     }
@@ -599,21 +615,44 @@ fn special_use(role: Option<&str>) -> &'static str {
     }
 }
 
-/// A list pattern (`*`, `%`, `INBOX`, `Archive/%`) against a name.
+/// A list pattern (`*`, `%`, `INBOX`, `Archive/%`) against a name, in
+/// time proportional to their lengths multiplied (no backtracking).
 fn matches_pattern(pattern: &str, name: &str) -> bool {
-    fn go(p: &[char], n: &[char]) -> bool {
-        match p.first() {
-            None => n.is_empty(),
-            Some('*') => (0..=n.len()).any(|i| go(&p[1..], &n[i..])),
-            Some('%') => (0..=n.len())
-                .take_while(|i| *i == 0 || n[*i - 1] != '/')
-                .any(|i| go(&p[1..], &n[i..])),
-            Some(c) => n.first().is_some_and(|x| x.eq_ignore_ascii_case(c)) && go(&p[1..], &n[1..]),
-        }
-    }
-    let p: Vec<char> = pattern.chars().collect();
+    let p: Vec<char> = pattern.chars().take(512).collect();
     let n: Vec<char> = name.chars().collect();
-    go(&p, &n)
+    // can[j]: the pattern so far matches the first j characters of the name.
+    let mut can = vec![false; n.len() + 1];
+    can[0] = true;
+    for c in &p {
+        let mut next = vec![false; n.len() + 1];
+        match c {
+            '*' => {
+                let mut any = false;
+                for j in 0..=n.len() {
+                    any |= can[j];
+                    next[j] = any;
+                }
+            }
+            '%' => {
+                // Like * but not across the hierarchy delimiter.
+                let mut any = false;
+                for j in 0..=n.len() {
+                    if j > 0 && n[j - 1] == '/' {
+                        any = false;
+                    }
+                    any |= can[j];
+                    next[j] = any;
+                }
+            }
+            c => {
+                for j in 1..=n.len() {
+                    next[j] = can[j - 1] && n[j - 1].eq_ignore_ascii_case(c);
+                }
+            }
+        }
+        can = next;
+    }
+    can[n.len()]
 }
 
 impl Session {
@@ -666,10 +705,13 @@ impl Session {
             let config = self.tls.clone().ok_or("993 needs a TLS certificate")?;
             self.secure = true;
             Box::new(
-                tokio_rustls::TlsAcceptor::from(config)
-                    .accept(socket)
-                    .await
-                    .map_err(|e| e.to_string())?,
+                tokio::time::timeout(
+                    HANDSHAKE,
+                    tokio_rustls::TlsAcceptor::from(config).accept(socket),
+                )
+                .await
+                .map_err(|_| "the client went away in the TLS handshake".to_string())?
+                .map_err(|e| e.to_string())?,
             )
         } else {
             Box::new(socket)
@@ -681,7 +723,19 @@ impl Session {
         );
         send(&mut reader, greeting.as_bytes()).await?;
         loop {
-            let command = match tokio::time::timeout(INACTIVITY, read_command(&mut reader)).await {
+            let command = match tokio::time::timeout(
+                INACTIVITY,
+                read_command(
+                    &mut reader,
+                    if self.user.is_some() {
+                        MAX_LITERAL
+                    } else {
+                        MAX_BEFORE_SIGN_IN
+                    },
+                ),
+            )
+            .await
+            {
                 Ok(Ok(Some(command))) => command,
                 Ok(Ok(None)) => return Err("the client went away".into()),
                 Ok(Err(e)) => {
@@ -724,10 +778,13 @@ impl Session {
                     // Anything sent before the handshake is dropped.
                     let plain = reader.into_inner();
                     let config = self.tls.clone().ok_or("no TLS")?;
-                    let accepted = tokio_rustls::TlsAcceptor::from(config)
-                        .accept(plain)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let accepted = tokio::time::timeout(
+                        HANDSHAKE,
+                        tokio_rustls::TlsAcceptor::from(config).accept(plain),
+                    )
+                    .await
+                    .map_err(|_| "the client went away in the TLS handshake".to_string())?
+                    .map_err(|e| e.to_string())?;
                     reader = BufReader::new(Box::new(accepted));
                     self.secure = true;
                 }
@@ -744,11 +801,13 @@ impl Session {
                     // No initial response: ask for it.
                     send(&mut reader, b"+ \r\n").await?;
                     let mut answer = String::new();
-                    (&mut reader)
-                        .take(MAX_LINE as u64)
-                        .read_line(&mut answer)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    tokio::time::timeout(
+                        HANDSHAKE,
+                        (&mut reader).take(MAX_LINE as u64).read_line(&mut answer),
+                    )
+                    .await
+                    .map_err(|_| "the client went away".to_string())?
+                    .map_err(|e| e.to_string())?;
                     let answer = answer.trim();
                     let reply = if answer == "*" {
                         format!("{tag} BAD Cancelled\r\n").into_bytes()
@@ -1005,6 +1064,21 @@ impl Session {
                     return out;
                 };
                 let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+                if message.len() > crate::smtp::max_size() {
+                    done(&mut out, "NO", "[TOOBIG] That message is too big");
+                    return out;
+                }
+                if !store::fits(
+                    self.instance.store.as_ref(),
+                    self.user.as_deref().unwrap_or_default(),
+                    message.len(),
+                )
+                .await
+                .unwrap_or(true)
+                {
+                    done(&mut out, "NO", "[OVERQUOTA] Your mailbox is full");
+                    return out;
+                }
                 match store::deliver(
                     &self.instance,
                     self.user.as_deref().unwrap_or_default(),
@@ -1058,6 +1132,23 @@ impl Session {
                 }
             }
             "STORE" => {
+                // CONDSTORE: STORE set (UNCHANGEDSINCE n) how flags.
+                let mut args = args.to_vec();
+                let mut unchanged_since: Option<i64> = None;
+                if let Some(Token::List(modifiers)) = args.get(1).cloned() {
+                    args.remove(1);
+                    let words: Vec<String> = modifiers.iter().map(Token::text).collect();
+                    if let Some(i) = words
+                        .iter()
+                        .position(|w| w.eq_ignore_ascii_case("UNCHANGEDSINCE"))
+                    {
+                        unchanged_since = words.get(i + 1).and_then(|n| n.parse().ok());
+                        if unchanged_since.is_none() {
+                            done(&mut out, "BAD", "UNCHANGEDSINCE needs a number");
+                            return out;
+                        }
+                    }
+                }
                 let (Some(set), Some(how), Some(flags)) = (args.first(), args.get(1), args.get(2))
                 else {
                     done(&mut out, "BAD", "STORE set how flags");
@@ -1072,7 +1163,7 @@ impl Session {
                     other => vec![other.text()],
                 };
                 out.extend(
-                    self.store_flags(&set.text(), &how.text(), &flags, uid)
+                    self.store_flags(&set.text(), &how.text(), &flags, uid, unchanged_since)
                         .await,
                 );
                 done(&mut out, "OK", "STORE done");
@@ -1086,6 +1177,10 @@ impl Session {
                     done(&mut out, "NO", "[TRYCREATE] No such mailbox");
                     return out;
                 };
+                if verb == "MOVE" && self.selected.as_ref().is_some_and(|s| s.read_only) {
+                    done(&mut out, "NO", "[READ-ONLY] EXAMINE is read-only");
+                    return out;
+                }
                 let (data, code) = self.copy(&set.text(), &target, uid, verb == "MOVE").await;
                 out.extend(data);
                 done(&mut out, "OK", &format!("{code}{verb} done"));
@@ -1248,8 +1343,12 @@ impl Session {
                     }
                     _ if upper.starts_with("BODY[") || upper.starts_with("BODY.PEEK[") => {
                         let peek = upper.starts_with("BODY.PEEK[");
-                        let open = item.find('[').unwrap_or(0);
-                        let close = item.rfind(']').unwrap_or(item.len());
+                        let (Some(open), Some(close)) = (item.find('['), item.rfind(']')) else {
+                            return Err(format!("{item} is not something to fetch"));
+                        };
+                        if close < open {
+                            return Err(format!("{item} is not something to fetch"));
+                        }
                         let spec = &item[open + 1..close];
                         let mut bytes = section(&raw, spec);
                         // A partial fetch: <start.length>.
@@ -1264,7 +1363,7 @@ impl Session {
                             let start: usize = start.parse().unwrap_or(0).min(bytes.len());
                             let end = length
                                 .and_then(|l| l.parse::<usize>().ok())
-                                .map_or(bytes.len(), |l| (start + l).min(bytes.len()));
+                                .map_or(bytes.len(), |l| start.saturating_add(l).min(bytes.len()));
                             bytes = bytes[start..end].to_vec();
                             name = format!("BODY[{spec}]<{start}>");
                         }
@@ -1294,7 +1393,14 @@ impl Session {
         Ok(out)
     }
 
-    async fn store_flags(&mut self, set: &str, how: &str, flags: &[String], uid: bool) -> Vec<u8> {
+    async fn store_flags(
+        &mut self,
+        set: &str,
+        how: &str,
+        flags: &[String],
+        uid: bool,
+        unchanged_since: Option<i64>,
+    ) -> Vec<u8> {
         let silent = how.to_ascii_uppercase().ends_with(".SILENT");
         let how = how.to_ascii_uppercase();
         let mailbox = self
@@ -1308,6 +1414,10 @@ impl Session {
             let Ok(Some(entry)) = store::entry_by_uid(store, &mailbox, message_uid).await else {
                 continue;
             };
+            // Changed since the client last looked: left alone (RFC 7162).
+            if unchanged_since.is_some_and(|since| entry.modseq > since) {
+                continue;
+            }
             let mut now: Vec<String> = entry.flags.clone();
             if how.starts_with('+') {
                 for f in flags {
@@ -1383,7 +1493,12 @@ impl Session {
         };
         let mut out = Vec::new();
         if moving {
-            let only: Vec<(i64, i64)> = picked.iter().map(|(_, u)| (*u, *u)).collect();
+            // Only what was copied leaves.
+            let only: Vec<(i64, i64)> = from
+                .iter()
+                .filter_map(|u| u.parse::<i64>().ok())
+                .map(|u| (u, u))
+                .collect();
             if !only.is_empty() {
                 out.extend(self.remove_uids(&only).await);
             }
@@ -1491,9 +1606,19 @@ impl Session {
 
     async fn idle(&mut self, tag: &str, reader: &mut Reader) -> Result<(), String> {
         send(reader, b"+ idling\r\n").await?;
+        let until = tokio::time::Instant::now() + INACTIVITY;
         loop {
+            if tokio::time::Instant::now() > until {
+                send(reader, b"* BYE Idle for too long\r\n").await?;
+                return Err("the client went away".into());
+            }
             let mut line = String::new();
-            match tokio::time::timeout(IDLE_CHECK, reader.read_line(&mut line)).await {
+            match tokio::time::timeout(
+                IDLE_CHECK,
+                (&mut *reader).take(MAX_LINE as u64).read_line(&mut line),
+            )
+            .await
+            {
                 Ok(Ok(0)) => return Err("the client went away".into()),
                 Ok(Ok(_)) => {
                     let done = line.trim().eq_ignore_ascii_case("DONE");
@@ -1523,36 +1648,71 @@ impl Session {
         }
     }
 
-    /// SEARCH: the keys apps use. Answers sequence numbers, or UIDs.
+    /// SEARCH: the keys apps use. Answers sequence numbers as this session
+    /// knows them, or UIDs.
     async fn search(&mut self, args: &[Token], uid: bool) -> Vec<i64> {
         let Some(selected) = &self.selected else {
             return Vec::new();
         };
         let store = self.instance.store.as_ref();
-        let entries = store::entries(store, &selected.mailbox.id, 0, i64::MAX)
-            .await
-            .unwrap_or_default();
+        let entries: std::collections::HashMap<i64, store::Entry> =
+            store::entries(store, &selected.mailbox.id, 0, i64::MAX)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| (e.uid, e))
+                .collect();
+        let args: Vec<Token> = args
+            .iter()
+            .filter(|a| !matches!(a, Token::Atom(s) if s.eq_ignore_ascii_case("CHARSET") || s.eq_ignore_ascii_case("UTF-8") || s.eq_ignore_ascii_case("US-ASCII")))
+            .take(200)
+            .cloned()
+            .collect();
+        let keys = format!("{args:?}").to_ascii_uppercase();
+        let needs_raw = ["BODY", "TEXT", "\"TO\"", "\"CC\"", "HEADER"]
+            .iter()
+            .any(|k| keys.contains(k));
         let user = self.user.clone().unwrap_or_default();
-        let mut raws: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let max_seq = selected.uids.len() as i64;
+        let max_uid = selected.uids.last().copied().unwrap_or(0);
         let mut results = Vec::new();
-        let args: Vec<Token> = args.iter().filter(|a| !matches!(a, Token::Atom(s) if s.eq_ignore_ascii_case("CHARSET") || s.eq_ignore_ascii_case("UTF-8") || s.eq_ignore_ascii_case("US-ASCII"))).cloned().collect();
-        for (i, entry) in entries.iter().enumerate() {
+        for (i, message_uid) in selected.uids.clone().iter().enumerate() {
+            let Some(entry) = entries.get(message_uid) else {
+                continue;
+            };
             let seq = i as i64 + 1;
+            let raw = if needs_raw {
+                String::from_utf8_lossy(
+                    &store::raw(&self.instance, &user, &entry.message)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default(),
+                )
+                .to_ascii_lowercase()
+            } else {
+                String::new()
+            };
+            let look = Look {
+                e: entry,
+                seq,
+                raw: &raw,
+                max_seq,
+                max_uid,
+            };
             let mut at = 0;
             let mut all = true;
             while at < args.len() {
-                let (ok, next) = Box::pin(self.matches(
-                    &args,
-                    at,
-                    entry,
-                    seq,
-                    &user,
-                    &mut raws,
-                    entries.len() as i64,
-                ))
-                .await;
-                all &= ok;
-                at = next;
+                match matches(&args, at, &look, 0) {
+                    Some((ok, next)) => {
+                        all &= ok;
+                        at = next;
+                    }
+                    None => {
+                        all = false;
+                        break;
+                    }
+                }
             }
             if all {
                 results.push(if uid { entry.uid } else { seq });
@@ -1560,138 +1720,119 @@ impl Session {
         }
         results
     }
+}
 
-    /// Whether one search key (at `at`) matches; answers where the next starts.
-    #[allow(clippy::too_many_arguments)]
-    async fn matches(
-        &self,
-        args: &[Token],
-        at: usize,
-        e: &store::Entry,
-        seq: i64,
-        user: &str,
-        raws: &mut std::collections::HashMap<String, String>,
-        max: i64,
-    ) -> (bool, usize) {
-        let key = args[at].text().to_ascii_uppercase();
-        let arg = |n: usize| args.get(at + n).map(Token::text).unwrap_or_default();
-        let has = |flag: &str| e.flags.iter().any(|f| f.eq_ignore_ascii_case(flag));
-        let raw = |raws: &mut std::collections::HashMap<String, String>| -> String {
-            raws.get(&e.message).cloned().unwrap_or_default()
-        };
-        if matches!(key.as_str(), "BODY" | "TEXT" | "TO" | "CC" | "HEADER")
-            && !raws.contains_key(&e.message)
-        {
-            let bytes = store::raw(&self.instance, user, &e.message)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            raws.insert(
-                e.message.clone(),
-                String::from_utf8_lossy(&bytes).to_ascii_lowercase(),
-            );
-        }
-        let has_text = |hay: &str, needle: &str| {
-            hay.to_ascii_lowercase()
-                .contains(&needle.to_ascii_lowercase())
-        };
-        match key.as_str() {
-            "ALL" => (true, at + 1),
-            "SEEN" => (has("\\Seen"), at + 1),
-            "UNSEEN" | "NEW" => (!has("\\Seen"), at + 1),
-            "FLAGGED" => (has("\\Flagged"), at + 1),
-            "UNFLAGGED" => (!has("\\Flagged"), at + 1),
-            "ANSWERED" => (has("\\Answered"), at + 1),
-            "UNANSWERED" => (!has("\\Answered"), at + 1),
-            "DELETED" => (has("\\Deleted"), at + 1),
-            "UNDELETED" => (!has("\\Deleted"), at + 1),
-            "DRAFT" => (has("\\Draft"), at + 1),
-            "UNDRAFT" => (!has("\\Draft"), at + 1),
-            "RECENT" | "OLD" => (key == "OLD", at + 1),
-            "KEYWORD" => (has(&arg(1)), at + 2),
-            "UNKEYWORD" => (!has(&arg(1)), at + 2),
-            "FROM" => (
-                has_text(
-                    &format!(
-                        "{} {}",
-                        e.from_name.clone().unwrap_or_default(),
-                        e.from_addr.clone().unwrap_or_default()
-                    ),
-                    &arg(1),
-                ),
-                at + 2,
-            ),
-            "SUBJECT" => (has_text(&e.subject, &arg(1)), at + 2),
-            "TO" | "CC" => {
-                let header = raw(raws);
-                let field = header
-                    .lines()
-                    .find(|l| l.starts_with(&format!("{}:", key.to_ascii_lowercase())))
-                    .unwrap_or_default()
-                    .to_string();
-                (has_text(&field, &arg(1)), at + 2)
-            }
-            "HEADER" => {
-                let header = raw(raws);
-                let name = arg(1).to_ascii_lowercase();
-                let field = header
-                    .lines()
-                    .find(|l| l.starts_with(&format!("{name}:")))
-                    .unwrap_or_default()
-                    .to_string();
-                (!field.is_empty() && has_text(&field, &arg(2)), at + 3)
-            }
-            "BODY" | "TEXT" => (has_text(&raw(raws), &arg(1)), at + 2),
-            "SINCE" => (
-                search_date(&arg(1)).is_some_and(|d| e.received_at >= d),
-                at + 2,
-            ),
-            "BEFORE" => (
-                search_date(&arg(1)).is_some_and(|d| e.received_at < d),
-                at + 2,
-            ),
-            "ON" => (
-                search_date(&arg(1))
-                    .is_some_and(|d| e.received_at >= d && e.received_at < d + 86_400_000),
-                at + 2,
-            ),
-            "LARGER" => (arg(1).parse::<i64>().is_ok_and(|n| e.size > n), at + 2),
-            "SMALLER" => (arg(1).parse::<i64>().is_ok_and(|n| e.size < n), at + 2),
-            "UID" => (
-                sequence_set(&arg(1), i64::MAX).is_some_and(|r| contains(&r, e.uid)),
-                at + 2,
-            ),
-            "NOT" => {
-                let (ok, next) =
-                    Box::pin(self.matches(args, at + 1, e, seq, user, raws, max)).await;
-                (!ok, next)
-            }
-            "OR" => {
-                let (a, next) = Box::pin(self.matches(args, at + 1, e, seq, user, raws, max)).await;
-                let (b, after) = Box::pin(self.matches(args, next, e, seq, user, raws, max)).await;
-                (a || b, after)
-            }
-            _ => match &args[at] {
-                Token::List(inner) => {
-                    let mut i = 0;
-                    let mut all = true;
-                    while i < inner.len() {
-                        let (ok, next) =
-                            Box::pin(self.matches(inner, i, e, seq, user, raws, max)).await;
-                        all &= ok;
-                        i = next;
-                    }
-                    (all, at + 1)
-                }
-                // A sequence set.
-                _ => (
-                    sequence_set(&key, max).is_some_and(|r| contains(&r, seq)),
-                    at + 1,
-                ),
-            },
-        }
+/// One message as SEARCH looks at it.
+struct Look<'a> {
+    e: &'a store::Entry,
+    seq: i64,
+    /// The raw message, lowercased (only when a key needs it).
+    raw: &'a str,
+    max_seq: i64,
+    max_uid: i64,
+}
+
+/// Whether the search key at `at` matches; answers where the next one
+/// starts. `None` for a key that is cut short or nested too deep.
+fn matches(args: &[Token], at: usize, look: &Look<'_>, depth: usize) -> Option<(bool, usize)> {
+    if depth > 32 {
+        return None;
     }
+    let key = args.get(at)?.text().to_ascii_uppercase();
+    let arg = |n: usize| args.get(at + n).map(Token::text);
+    let e = look.e;
+    let has = |flag: &str| e.flags.iter().any(|f| f.eq_ignore_ascii_case(flag));
+    let has_text = |hay: &str, needle: &str| hay.to_lowercase().contains(&needle.to_lowercase());
+    let header = |name: &str| -> String {
+        let head_end = look.raw.find("\r\n\r\n").unwrap_or(look.raw.len());
+        look.raw[..head_end]
+            .lines()
+            .find(|l| l.starts_with(&format!("{name}:")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    Some(match key.as_str() {
+        "ALL" => (true, at + 1),
+        "SEEN" => (has("\\Seen"), at + 1),
+        "UNSEEN" | "NEW" => (!has("\\Seen"), at + 1),
+        "FLAGGED" => (has("\\Flagged"), at + 1),
+        "UNFLAGGED" => (!has("\\Flagged"), at + 1),
+        "ANSWERED" => (has("\\Answered"), at + 1),
+        "UNANSWERED" => (!has("\\Answered"), at + 1),
+        "DELETED" => (has("\\Deleted"), at + 1),
+        "UNDELETED" => (!has("\\Deleted"), at + 1),
+        "DRAFT" => (has("\\Draft"), at + 1),
+        "UNDRAFT" => (!has("\\Draft"), at + 1),
+        "RECENT" | "OLD" => (key == "OLD", at + 1),
+        "KEYWORD" => (has(&arg(1)?), at + 2),
+        "UNKEYWORD" => (!has(&arg(1)?), at + 2),
+        "FROM" => (
+            has_text(
+                &format!(
+                    "{} {}",
+                    e.from_name.clone().unwrap_or_default(),
+                    e.from_addr.clone().unwrap_or_default()
+                ),
+                &arg(1)?,
+            ),
+            at + 2,
+        ),
+        "SUBJECT" => (has_text(&e.subject, &arg(1)?), at + 2),
+        "TO" | "CC" => (
+            has_text(&header(&key.to_ascii_lowercase()), &arg(1)?),
+            at + 2,
+        ),
+        "HEADER" => {
+            let field = header(&arg(1)?.to_ascii_lowercase());
+            (!field.is_empty() && has_text(&field, &arg(2)?), at + 3)
+        }
+        "BODY" | "TEXT" => (has_text(look.raw, &arg(1)?), at + 2),
+        "SINCE" => (
+            search_date(&arg(1)?).is_some_and(|d| e.received_at >= d),
+            at + 2,
+        ),
+        "BEFORE" => (
+            search_date(&arg(1)?).is_some_and(|d| e.received_at < d),
+            at + 2,
+        ),
+        "ON" => (
+            search_date(&arg(1)?)
+                .is_some_and(|d| e.received_at >= d && e.received_at < d + 86_400_000),
+            at + 2,
+        ),
+        "LARGER" => (arg(1)?.parse::<i64>().is_ok_and(|n| e.size > n), at + 2),
+        "SMALLER" => (arg(1)?.parse::<i64>().is_ok_and(|n| e.size < n), at + 2),
+        "UID" => (
+            sequence_set(&arg(1)?, look.max_uid.max(1)).is_some_and(|r| contains(&r, e.uid)),
+            at + 2,
+        ),
+        "NOT" => {
+            let (ok, next) = matches(args, at + 1, look, depth + 1)?;
+            (!ok, next)
+        }
+        "OR" => {
+            let (a, next) = matches(args, at + 1, look, depth + 1)?;
+            let (b, after) = matches(args, next, look, depth + 1)?;
+            (a || b, after)
+        }
+        _ => match &args[at] {
+            Token::List(inner) => {
+                let mut i = 0;
+                let mut all = true;
+                while i < inner.len() {
+                    let (ok, next) = matches(inner, i, look, depth + 1)?;
+                    all &= ok;
+                    i = next;
+                }
+                (all, at + 1)
+            }
+            // A sequence set.
+            _ => (
+                sequence_set(&key, look.max_seq.max(1)).is_some_and(|r| contains(&r, look.seq)),
+                at + 1,
+            ),
+        },
+    })
 }
 
 async fn send(reader: &mut Reader, bytes: &[u8]) -> Result<(), String> {

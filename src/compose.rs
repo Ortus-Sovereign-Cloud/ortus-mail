@@ -159,14 +159,12 @@ async fn upload(request: &Request, ortus: &Arc<Instance>) -> Result<Response, Ap
         });
     }
     let blob = format!("u_{}", ortus_core::auth::random_hex(12));
-    ortus
-        .files
-        .put(&format!("mail/{}/uploads/{blob}", me.user.id), data)
-        .await
-        .map_err(|e| {
-            eprintln!("ortus: mail: upload: {e}");
-            ApiError::internal()
-        })?;
+    let path = format!("mail/{}/uploads/{blob}", me.user.id);
+    ortus.files.put(&path, data).await.map_err(|e| {
+        eprintln!("ortus: mail: upload: {e}");
+        ApiError::internal()
+    })?;
+    crate::store::track_upload(ortus.store.as_ref(), &me.user.id, &path).await?;
     Ok(ok(&json!({"blobId": blob, "size": data.len()})))
 }
 

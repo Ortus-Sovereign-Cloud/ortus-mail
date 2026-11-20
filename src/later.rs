@@ -198,15 +198,13 @@ pub async fn run(instance: &Instance, job: &Job) -> Result<(), String> {
     .await;
     match result {
         Ok(_) => {
-            // The draft goes: a copy is in Sent now.
-            for entry in store
-                .query("SELECT e.mailbox_id, e.uid FROM mail_entries e JOIN mail_mailboxes b ON b.id = e.mailbox_id WHERE e.message = $1 AND b.user_id = $2", &[email_id.as_str().into(), user.as_str().into()])
-                .await
-                .map_err(|e| e.to_string())?
-            {
-                store::expunge(instance, entry.text(0).unwrap_or_default(), entry.int(1).unwrap_or(0)).await.map_err(|e| e.to_string())?;
+            // Sent: recorded first, so nothing can send it again; then the
+            // draft goes (a copy is in Sent now). Leftovers are only a draft.
+            finish("sent", None).await?;
+            if let Err(e) = store::remove_message(instance, &user, &email_id).await {
+                eprintln!("ortus: mail: removing a sent draft: {e}");
             }
-            finish("sent", None).await
+            Ok(())
         }
         // Storing or queueing failed: the job tries again.
         Err(Refused::Failed) => Err("could not send yet".into()),

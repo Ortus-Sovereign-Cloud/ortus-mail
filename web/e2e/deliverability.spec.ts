@@ -1,6 +1,7 @@
 // Admin › Deliverability (AdminDeliverability): a DMARC report arrives by
 // mail and shows who sends as our domain; the numbers of mail sent; in six
 // languages.
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { expect, test } from "@playwright/test";
 import ar from "../src/locales/ar.js";
@@ -22,9 +23,20 @@ function report(): string {
   return `From: noreply-dmarc-support@google.com\nTo: dmarc-reports@ministry.example\nSubject: Report domain: ministry.example\nMessage-ID: <e2e-${now}@google.com>\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary="b"\n\n--b\nContent-Type: text/plain\n\nAggregate report.\n--b\nContent-Type: application/gzip; name="google.com!ministry.example.xml.gz"\nContent-Disposition: attachment\nContent-Transfer-Encoding: base64\n\n${attachment}\n--b--\n`;
 }
 
+/** Adds records to the test DNS zone (the domains test wrote the rest). */
+function publish(records: Record<string, unknown[]>): void {
+  const file = new URL("./zone.json", import.meta.url);
+  const zone = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+  writeFileSync(file, JSON.stringify({ ...zone, ...records }));
+}
+
 test("a DMARC report shows who sends as the domain", async ({ page }) => {
+  // Reports are read only from who they say they are from.
+  publish({ "google.com TXT": [["v=spf1 ip4:127.0.0.1 -all"]], "_dmarc.google.com TXT": [["v=DMARC1; p=reject"]] });
   const reply = await deliver(smtpPort, "noreply-dmarc-support@google.com", "dmarc-reports@ministry.example", report());
   expect(reply).toMatch(/^250/);
+  // It is read after the reply; the page shows it once it is in.
+  await expect.poll(async () => JSON.stringify(await (await page.request.get("/api/v1/mail/admin/deliverability?days=14")).json()), { timeout: 10_000 }).toContain("231");
   await page.goto("/admin/deliverability");
   const screen = page.locator("ortus-mail-deliverability");
   await expect(screen.getByRole("heading", { level: 1, name: en.deliverability })).toBeVisible();
