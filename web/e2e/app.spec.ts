@@ -29,9 +29,17 @@ for (const locale of LOCALES) {
     const errors = watchForErrors(page);
     await page.addInitScript((code) => localStorage.setItem("ortus.locale", code), locale.code);
     await page.goto("/mail");
-    await expect(page.locator("ortus-mail-app").getByRole("heading", { level: 1, name: locale.texts.inbox as string })).toBeVisible();
+    const inbox = page.locator("ortus-mail-inbox");
+    await expect(inbox.getByRole("heading", { level: 1, name: locale.texts.inbox as string })).toBeAttached();
+    await expect(inbox.getByRole("navigation").getByRole("button", { name: locale.texts.inbox as string })).toHaveAttribute("aria-current", "page");
+    await expect(inbox.getByRole("tab", { name: locale.texts.tabImportant as string })).toHaveAttribute("aria-selected", "true");
+    await expect(inbox.getByRole("button", { name: /Anna Kowalska/ })).toBeVisible();
+    await expect(inbox.getByRole("searchbox", { name: locale.texts.searchMail as string })).toBeVisible();
+    await expect(inbox.getByRole("link", { name: locale.texts.newMessage as string })).toBeVisible();
+    await expect(inbox.getByRole("heading", { name: locale.texts.agendaToday as string })).toBeVisible();
     await expect(page.locator("html")).toHaveAttribute("dir", locale.dir);
     await expect(page.locator("ortus-shell nav a[href=\"/mail\"]")).toHaveAttribute("aria-current", "page");
+    if (locale.code === "ar") await page.screenshot({ path: "test-results/inbox-ar.png" });
     expect(errors).toEqual([]);
   });
 }

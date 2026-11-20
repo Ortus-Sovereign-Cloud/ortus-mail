@@ -14,7 +14,11 @@ export default defineConfig({
   reporter: [["list"]],
   globalSetup: "./e2e/global-setup.ts",
   use: { baseURL: `http://localhost:${port}`, viewport: { width: 1440, height: 900 }, colorScheme: "dark", storageState: "test-results/owner.json" },
-  projects: [{ name: "chromium", use: { browserName: "chromium" } }],
+  // Admin › Domains starts from no domain; the rest needs the one it adds.
+  projects: [
+    { name: "domains", testMatch: /domains\.spec\.ts/, use: { browserName: "chromium" } },
+    { name: "chromium", testIgnore: /domains\.spec\.ts/, dependencies: ["domains"], use: { browserName: "chromium" } },
+  ],
   webServer: [
     // A test DNS server, answering from e2e/zone.json.
     { command: `rm -f e2e/zone.json && node e2e/dns-server.mjs ${dnsPort}`, wait: { stdout: /listening/ }, reuseExistingServer: false },

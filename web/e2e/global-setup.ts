@@ -1,6 +1,8 @@
-// Creates the first owner through the real setup page, once, and keeps
-// the signed-in session for every test (test-results/owner.json).
+// Creates the first owner through the real setup page, once, keeps the
+// signed-in session for every test (test-results/owner.json) and gives
+// the owner some mail.
 import { chromium, expect, type FullConfig } from "@playwright/test";
+import { seedMail } from "./seed.js";
 
 export default async function globalSetup(config: FullConfig): Promise<void> {
   const baseURL = config.projects[0]?.use.baseURL as string;
@@ -12,5 +14,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
   await page.getByRole("button", { name: "Create the owner" }).click();
   await expect(page.locator("ortus-shell")).toBeAttached();
   await page.context().storageState({ path: "test-results/owner.json" });
+  const token = (await page.context().cookies()).find((c) => c.name === "ortus")?.value ?? "";
+  await seedMail(page.request, token);
   await browser.close();
 }

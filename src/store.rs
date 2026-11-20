@@ -104,6 +104,11 @@ pub const MIGRATIONS: &[Migration] = &[
         PRIMARY KEY (user_id, address)
     )",
     },
+    Migration {
+        version: 4,
+        name: "the inbox tab a message belongs to",
+        sql: "ALTER TABLE mail_messages ADD COLUMN category TEXT NOT NULL DEFAULT 'important'",
+    },
 ];
 
 /// The mailboxes everyone has, by role, with their IMAP names.
@@ -198,6 +203,50 @@ pub struct Summary {
     pub sent_at: Option<i64>,
     pub preview: String,
     pub attachments: i64,
+    /// The inbox tab: `important` (from people), `feeds` (lists and
+    /// newsletters) or `other` (sent by machines).
+    pub category: String,
+}
+
+/// The inbox tab of a message, from its headers.
+fn category_of(message: &mail_parser::Message<'_>) -> &'static str {
+    let headers = message.headers();
+    let has = |name: &str| headers.contains(name);
+    let text = |name: &str| {
+        headers
+            .value(name)
+            .and_then(|v| v.as_text().map(str::to_ascii_lowercase))
+            .unwrap_or_default()
+    };
+    if has("List-Id")
+        || has("List-Unsubscribe")
+        || matches!(text("Precedence").as_str(), "bulk" | "list")
+    {
+        return "feeds";
+    }
+    let auto = text("Auto-Submitted");
+    let from = message
+        .from()
+        .and_then(|l| l.first())
+        .and_then(|m| m.address().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
+    let local = from.split('@').next().unwrap_or_default();
+    if (!auto.is_empty() && auto != "no")
+        || [
+            "noreply",
+            "no-reply",
+            "donotreply",
+            "do-not-reply",
+            "mailer-daemon",
+            "postmaster",
+            "notifications",
+            "alerts",
+        ]
+        .contains(&local)
+    {
+        return "other";
+    }
+    "important"
 }
 
 /// Reads a raw message; one that does not parse still gets stored, with
@@ -243,6 +292,7 @@ pub fn summarise(raw: &[u8]) -> Summary {
             .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
             .unwrap_or_default(),
         attachments,
+        category: category_of(&message).to_string(),
     }
 }
 
@@ -333,8 +383,8 @@ pub async fn deliver(
         }
         let thread = thread.unwrap_or_else(|| new_id("t_"));
         tx.execute(
-            "INSERT INTO mail_messages (id, user_id, blob, size, received_at, sent_at, message_id, thread_id, subject, from_addr, from_name, recipients, preview, attachments, auth, spam)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+            "INSERT INTO mail_messages (id, user_id, blob, size, received_at, sent_at, message_id, thread_id, subject, from_addr, from_name, recipients, preview, attachments, auth, spam, category)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
             &[
                 id.as_str().into(),
                 user_id.into(),
@@ -352,6 +402,7 @@ pub async fn deliver(
                 summary.attachments.into(),
                 auth.map(|a| a.to_string()).into(),
                 spam.into(),
+                if summary.category.is_empty() { "important" } else { summary.category.as_str() }.into(),
             ],
         )
         .await?;

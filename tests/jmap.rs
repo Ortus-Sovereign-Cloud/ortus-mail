@@ -66,6 +66,17 @@ fn apps_use_mail_over_jmap() {
             ))
             .unwrap();
         }
+        let news = "From: City News <news@city.example>\r\nTo: olena@ministry.example\r\nSubject: Weekly digest\r\nList-Id: <news.city.example>\r\nMessage-ID: <n@city.example>\r\nContent-Type: text/html\r\n\r\n<p>Road <b>works</b> this week</p>\r\n";
+        let feed = block_on(store::deliver(
+            &instance,
+            &olena,
+            &inbox.id,
+            news.as_bytes(),
+            &[],
+            Some(&json!({"dmarc": "pass"})),
+            0,
+        ))
+        .unwrap();
         let sams_inbox = block_on(store::by_role(instance.store.as_ref(), &sam, "inbox")).unwrap();
         let private = block_on(store::deliver(
             &instance,
@@ -158,17 +169,31 @@ fn apps_use_mail_over_jmap() {
         let boxes = r[0][1]["list"].as_array().unwrap();
         let inbox_json = boxes.iter().find(|b| b["role"] == "inbox").unwrap();
         assert_eq!(
-            (2, 2),
+            (3, 3),
             (
                 inbox_json["totalEmails"].as_i64().unwrap(),
                 inbox_json["unreadEmails"].as_i64().unwrap()
             ),
             "{name}: {inbox_json}"
         );
+        // The tabs: feeds apart from mail from people; text from HTML.
+        let r2 = jmap(json!([
+            ["Email/query", {"filter": {"inMailbox": inbox.id, "ortusCategory": "feeds"}}, "0"],
+            ["Email/get", {"ids": [feed.message], "properties": ["ortusCategory", "ortusVerified", "ortusText"]}, "1"],
+        ]));
+        assert_eq!(json!([feed.message]), r2[0][1]["ids"], "{name}");
+        let got = &r2[1][1]["list"][0];
+        assert!(
+            got["ortusCategory"] == "feeds"
+                && got["ortusVerified"] == true
+                && got["ortusText"].as_str().unwrap().contains("Road works"),
+            "{name}: {got}"
+        );
+        jmap(json!([["Email/set", {"destroy": [feed.message]}, "0"]]));
         let ids = r[1][1]["ids"].as_array().unwrap().clone();
-        assert_eq!(2, ids.len(), "{name}: {}", r[1]);
+        assert_eq!(3, ids.len(), "{name}: {}", r[1]);
         let emails = r[2][1]["list"].as_array().unwrap();
-        let budget = &emails[0];
+        let budget = &emails[1];
         assert_eq!("The budget", budget["subject"], "{name}: newest first");
         assert_eq!("sam@ministry.example", budget["from"][0]["email"]);
         let text_part = budget["textBody"][0]["partId"].as_str().unwrap();

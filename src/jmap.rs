@@ -310,6 +310,17 @@ struct Stored {
     attachments: i64,
     mailboxes: Vec<(String, i64)>,
     keywords: Vec<String>,
+    category: String,
+    verified: bool,
+}
+
+/// Whether the sender is who they say: mail from inside the installation,
+/// or DKIM aligned with the From domain (DMARC).
+fn verified(auth: Option<&str>) -> bool {
+    let Some(auth) = auth.and_then(|a| serde_json::from_str::<Value>(a).ok()) else {
+        return false;
+    };
+    auth["internal"] == true || auth["dmarc"] == "pass"
 }
 
 async fn stored(ctx: &Ctx<'_>, ids: &[String]) -> Result<Vec<Stored>, MethodError> {
@@ -318,7 +329,7 @@ async fn stored(ctx: &Ctx<'_>, ids: &[String]) -> Result<Vec<Stored>, MethodErro
         let rows = ctx
             .store()
             .query(
-                "SELECT id, thread_id, blob, size, received_at, subject, preview, attachments FROM mail_messages WHERE id = $1 AND user_id = $2",
+                "SELECT id, thread_id, blob, size, received_at, subject, preview, attachments, category, auth FROM mail_messages WHERE id = $1 AND user_id = $2",
                 &[id.as_str().into(), ctx.user.id.as_str().into()],
             )
             .await?;
@@ -343,6 +354,8 @@ async fn stored(ctx: &Ctx<'_>, ids: &[String]) -> Result<Vec<Stored>, MethodErro
             subject: r.text(5).unwrap_or_default().into(),
             preview: r.text(6).unwrap_or_default().into(),
             attachments: r.int(7).unwrap_or(0),
+            category: r.text(8).unwrap_or("important").into(),
+            verified: verified(r.text(9)),
             mailboxes: entries
                 .iter()
                 .map(|e| {
@@ -417,7 +430,7 @@ async fn stored_all(ctx: &Ctx<'_>) -> Result<Vec<Stored>, MethodError> {
     let mut out = Vec::new();
     for r in ctx
         .store()
-        .query("SELECT id, thread_id, blob, size, received_at, subject, preview, attachments FROM mail_messages WHERE user_id = $1 ORDER BY received_at DESC, id", &[user.into()])
+        .query("SELECT id, thread_id, blob, size, received_at, subject, preview, attachments, category, auth FROM mail_messages WHERE user_id = $1 ORDER BY received_at DESC, id", &[user.into()])
         .await?
     {
         let id = r.text(0).unwrap_or_default().to_string();
@@ -431,6 +444,8 @@ async fn stored_all(ctx: &Ctx<'_>) -> Result<Vec<Stored>, MethodError> {
             subject: r.text(5).unwrap_or_default().into(),
             preview: r.text(6).unwrap_or_default().into(),
             attachments: r.int(7).unwrap_or(0),
+            category: r.text(8).unwrap_or("important").into(),
+            verified: verified(r.text(9)),
             mailboxes,
             keywords,
         });
@@ -495,6 +510,8 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
                 | "subject"
                 | "preview"
                 | "hasAttachment"
+                | "ortusCategory"
+                | "ortusVerified"
         )
     });
     let found = stored(ctx, &ids).await?;
@@ -540,6 +557,8 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
                 "subject" => json!(s.subject),
                 "preview" => json!(s.preview),
                 "hasAttachment" => json!(s.attachments > 0),
+                "ortusCategory" => json!(s.category),
+                "ortusVerified" => json!(s.verified),
                 _ => {
                     let Some(m) = &parsed else {
                         email.insert(p.clone(), Value::Null);
@@ -560,6 +579,10 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
                         "bcc" => addresses(m.bcc()),
                         "replyTo" => addresses(m.reply_to()),
                         "sentAt" => m.date().map_or(Value::Null, |d| json!(d.to_rfc3339())),
+                        // The text to show: the plain part, or the HTML one as text.
+                        "ortusText" => {
+                            json!(m.body_text(0).map(|t| t.into_owned()).unwrap_or_default())
+                        }
                         "textBody" | "htmlBody" | "attachments" | "bodyValues" => {
                             let text: Vec<mail_parser::MessagePart<'_>> = m.text_body().collect();
                             let html: Vec<mail_parser::MessagePart<'_>> = m.html_body().collect();
@@ -683,6 +706,7 @@ fn matches(
             "minSize" => value.as_i64().is_some_and(|n| s.size >= n),
             "maxSize" => value.as_i64().is_some_and(|n| s.size < n),
             "hasAttachment" => value.as_bool().is_some_and(|b| (s.attachments > 0) == b),
+            "ortusCategory" => value.as_str().is_some_and(|c| s.category == c),
             _ => return Err(MethodError("unsupportedFilter", Some(key.clone()))),
         };
         if !ok {
@@ -1347,8 +1371,8 @@ async fn submission_set(
             .map_err(|refused| match refused {
                 send::Refused::NotYourAddress => json!({"type": "forbiddenFrom"}),
                 send::Refused::BadRecipient { address } => json!({"type": "invalidRecipients", "invalidRecipients": [address]}),
-                send::Refused::Policy { address, decision } => json!({"type": "forbiddenToSend", "description": format!("The label does not let it go to {address}."), "ortusDecision": decision}),
-                send::Refused::NeedsReason { address, label } => json!({"type": "forbiddenToSend", "description": format!("Sending {label} mail to {address} needs a reason (ortusReason)."), "ortusNeedsReason": true}),
+                send::Refused::Policy { address, decision } => json!({"type": "forbiddenToSend", "description": format!("The label does not let it go to {address}."), "ortusDecision": decision, "ortusAddress": address}),
+                send::Refused::NeedsReason { address, label } => json!({"type": "forbiddenToSend", "description": format!("Sending {label} mail to {address} needs a reason (ortusReason)."), "ortusNeedsReason": true, "ortusAddress": address, "ortusLabel": label}),
                 send::Refused::Failed => json!({"type": "serverFail"}),
             })?;
             let id = format!("s_{}", ortus_core::auth::random_hex(8));
@@ -1821,6 +1845,48 @@ fn h_upload(
     })
 }
 
+async fn download(
+    instance: &Arc<Instance>,
+    user: &User,
+    blob: &str,
+    name: &str,
+) -> Result<Response, ApiError> {
+    let ctx = Ctx { instance, user };
+    let data = blob_bytes(&ctx, blob)
+        .await
+        .ok_or_else(|| ApiError::not_found("There is no such blob."))?;
+    let name: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || "._- ".contains(*c))
+        .collect();
+    // Always a download, never shown as a page of this site.
+    let header = |name: &str, value: String| rust_web_server::header::Header {
+        name: name.to_string().into(),
+        value: value.into(),
+    };
+    let headers = vec![
+        header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{name}\""),
+        ),
+        header("X-Content-Type-Options", "nosniff".into()),
+        header(
+            "Content-Security-Policy",
+            "sandbox; default-src 'none'".into(),
+        ),
+        header("Cache-Control", "private, no-store".into()),
+    ];
+    let body = rust_web_server::range::Range::get_content_range(
+        data,
+        "application/octet-stream".to_string(),
+    );
+    Ok(Response::get_response(
+        STATUS_CODE_REASON_PHRASE.n200_ok,
+        Some(headers),
+        Some(vec![body]),
+    ))
+}
+
 fn h_download(
     request: Request,
     params: PathParams,
@@ -1833,48 +1899,40 @@ fn h_download(
             if params.get("account").unwrap_or_default() != user.id {
                 return Err(ApiError::not_found("There is no such account."));
             }
-            let ctx = Ctx {
-                instance: &instance,
-                user: &user,
-            };
             let blob = params.get("blob").unwrap_or_default();
-            let data = blob_bytes(&ctx, blob)
+            download(
+                &instance,
+                &user,
+                blob,
+                params.get("name").unwrap_or("download"),
+            )
+            .await
+        }
+        .await;
+        answer(&request, result)
+    })
+}
+
+/// Attachments for the web client, with its session.
+fn h_web_download(
+    request: Request,
+    params: PathParams,
+    _: ConnectionInfo,
+    instance: Arc<Instance>,
+) -> BoxFuture<'static, Response> {
+    Box::pin(async move {
+        let result = async {
+            let me = ortus_core::auth::current(&request, &instance)
                 .await
-                .ok_or_else(|| ApiError::not_found("There is no such blob."))?;
-            let name: String = params
-                .get("name")
-                .unwrap_or("download")
-                .chars()
-                .filter(|c| c.is_alphanumeric() || "._- ".contains(*c))
-                .collect();
-            // Always a download, never shown as a page of this site.
-            let headers = vec![
-                rust_web_server::header::Header {
-                    name: "Content-Disposition".to_string().into(),
-                    value: format!("attachment; filename=\"{name}\"").into(),
-                },
-                rust_web_server::header::Header {
-                    name: "X-Content-Type-Options".to_string().into(),
-                    value: "nosniff".to_string().into(),
-                },
-                rust_web_server::header::Header {
-                    name: "Content-Security-Policy".to_string().into(),
-                    value: "sandbox; default-src 'none'".to_string().into(),
-                },
-                rust_web_server::header::Header {
-                    name: "Cache-Control".to_string().into(),
-                    value: "private, no-store".to_string().into(),
-                },
-            ];
-            let body = rust_web_server::range::Range::get_content_range(
-                data,
-                "application/octet-stream".to_string(),
-            );
-            Ok(Response::get_response(
-                STATUS_CODE_REASON_PHRASE.n200_ok,
-                Some(headers),
-                Some(vec![body]),
-            ))
+                .ok_or_else(ApiError::sign_in)?;
+            let blob = params.get("blob").unwrap_or_default();
+            download(
+                &instance,
+                &me.user,
+                blob,
+                params.get("name").unwrap_or("download"),
+            )
+            .await
         }
         .await;
         answer(&request, result)
@@ -1890,10 +1948,30 @@ fn h_events(
     instance: Arc<Instance>,
 ) -> BoxFuture<'static, Response> {
     Box::pin(async move {
-        let user = match signed(&request, &connection, &instance).await {
-            Ok(u) => u,
-            Err(e) => return answer(&request, Err::<Response, _>(e)),
-        };
+        match signed(&request, &connection, &instance).await {
+            Ok(user) => events(&request, instance, user),
+            Err(e) => answer(&request, Err::<Response, _>(e)),
+        }
+    })
+}
+
+/// Push for the web client, with its session.
+fn h_web_events(
+    request: Request,
+    _: PathParams,
+    _: ConnectionInfo,
+    instance: Arc<Instance>,
+) -> BoxFuture<'static, Response> {
+    Box::pin(async move {
+        match ortus_core::auth::current(&request, &instance).await {
+            Some(me) => events(&request, instance, me.user),
+            None => answer(&request, Err::<Response, _>(ApiError::sign_in())),
+        }
+    })
+}
+
+fn events(request: &Request, instance: Arc<Instance>, user: User) -> Response {
+    {
         let query = request
             .request_uri
             .split_once('?')
@@ -1936,7 +2014,7 @@ fn h_events(
             }
         });
         response
-    })
+    }
 }
 
 fn any_object() -> Value {
@@ -2002,6 +2080,22 @@ pub fn routes() -> Vec<Route> {
             "JMAP method calls from the web client, with its session.",
             Access::Signed,
             h_web,
+        ),
+        route(
+            Method::Get,
+            "/mail/web/download/:blob/:name",
+            "mailWebDownload",
+            "Download a message or one of its parts, from the web client.",
+            Access::Signed,
+            h_web_download,
+        ),
+        route(
+            Method::Get,
+            "/mail/web/events",
+            "mailWebEvents",
+            "Push for the web client: state changes as server-sent events.",
+            Access::Signed,
+            h_web_events,
         ),
     ]
 }
