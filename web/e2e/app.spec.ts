@@ -29,7 +29,7 @@ for (const locale of LOCALES) {
     const errors = watchForErrors(page);
     await page.addInitScript((code) => localStorage.setItem("ortus.locale", code), locale.code);
     await page.goto("/mail");
-    await expect(page.locator("ortus-mail-app").getByRole("heading", { level: 1, name: locale.texts.inbox })).toBeVisible();
+    await expect(page.locator("ortus-mail-app").getByRole("heading", { level: 1, name: locale.texts.inbox as string })).toBeVisible();
     await expect(page.locator("html")).toHaveAttribute("dir", locale.dir);
     await expect(page.locator("ortus-shell nav a[href=\"/mail\"]")).toHaveAttribute("aria-current", "page");
     expect(errors).toEqual([]);

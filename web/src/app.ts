@@ -1,5 +1,6 @@
 // The mail app's client: the element the shell shows at /mail.
 import { LitElement, LocalizeController, controls, css, customElement, html } from "ortus-kit";
+import "./domains.js";
 import { ready, t } from "./i18n.js";
 
 await ready;
