@@ -12,6 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
 use mail_auth::dmarc::verify::DmarcParameters;
 use mail_auth::dmarc::Policy;
 use mail_auth::headers::HeaderWriter;
@@ -74,11 +75,67 @@ pub fn run(
     })
 }
 
+/// The submission listeners for signed-in apps: 587 (STARTTLS), and 465
+/// (TLS from the start) when a certificate is set.
+pub fn run_submission(
+    instance: Arc<Instance>,
+    mut stop: ortus_core::app::Stop,
+) -> ortus_core::storage::BoxFuture<'static, Result<(), String>> {
+    Box::pin(async move {
+        let starttls =
+            std::env::var("ORTUS_SUBMISSION_LISTEN").unwrap_or_else(|_| "0.0.0.0:587".into());
+        let listener = TcpListener::bind(&starttls)
+            .await
+            .map_err(|e| format!("submission on {starttls}: {e}"))?;
+        println!("ortus: mail: submission on {starttls}");
+        if tls().is_some() {
+            let implicit =
+                std::env::var("ORTUS_SUBMISSIONS_LISTEN").unwrap_or_else(|_| "0.0.0.0:465".into());
+            let tls_listener = TcpListener::bind(&implicit)
+                .await
+                .map_err(|e| format!("submission on {implicit}: {e}"))?;
+            println!("ortus: mail: submission with TLS on {implicit}");
+            let (instance2, mut stop2) = (Arc::clone(&instance), stop.clone());
+            tokio::spawn(async move {
+                if let Err(e) = serve_as(
+                    instance2,
+                    tls_listener,
+                    &mut stop2,
+                    Mode::Submission { implicit_tls: true },
+                )
+                .await
+                {
+                    eprintln!("ortus: mail: submission with TLS: {e}");
+                }
+            });
+        }
+        serve_as(
+            instance,
+            listener,
+            &mut stop,
+            Mode::Submission {
+                implicit_tls: false,
+            },
+        )
+        .await
+    })
+}
+
 /// Accepts connections on `listener` until `stop` turns true.
 pub async fn serve(
     instance: Arc<Instance>,
     listener: TcpListener,
     stop: &mut ortus_core::app::Stop,
+) -> Result<(), String> {
+    serve_as(instance, listener, stop, Mode::Receive).await
+}
+
+/// Accepts connections for `mode` on `listener` until `stop` turns true.
+pub async fn serve_as(
+    instance: Arc<Instance>,
+    listener: TcpListener,
+    stop: &mut ortus_core::app::Stop,
+    mode: Mode,
 ) -> Result<(), String> {
     let (config, options) = crate::domains::resolver_config()?;
     let authenticator =
@@ -90,7 +147,7 @@ pub async fn serve(
                 let Ok((socket, peer)) = accepted else { continue };
                 let (instance, authenticator, tls) = (Arc::clone(&instance), Arc::clone(&authenticator), tls.clone());
                 tokio::spawn(async move {
-                    let session = Session::new(instance, authenticator, peer, tls.is_some());
+                    let session = Session::new(instance, authenticator, peer, tls.is_some(), mode);
                     if let Err(e) = session.run(socket, tls).await {
                         eprintln!("ortus: mail: SMTP from {peer}: {e}");
                     }
@@ -99,6 +156,15 @@ pub async fn serve(
             _ = stop.changed() => return Ok(()),
         }
     }
+}
+
+/// What a listener is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Mail from other servers for our domains (port 25).
+    Receive,
+    /// Mail from signed-in apps, to anyone (587 with STARTTLS, 465 with TLS).
+    Submission { implicit_tls: bool },
 }
 
 trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -111,6 +177,9 @@ struct Session {
     host: String,
     tls_offered: bool,
     secure: bool,
+    mode: Mode,
+    /// Who signed in (submission).
+    user: Option<String>,
     helo: Option<String>,
     from: Option<String>,
     /// (address, user id)
@@ -143,6 +212,7 @@ impl Session {
         authenticator: Arc<MessageAuthenticator>,
         peer: SocketAddr,
         tls_offered: bool,
+        mode: Mode,
     ) -> Self {
         let host = crate::domains::Hosts::of(&instance).mail;
         Self {
@@ -152,6 +222,8 @@ impl Session {
             host,
             tls_offered,
             secure: false,
+            mode,
+            user: None,
             helo: None,
             from: None,
             to: Vec::new(),
@@ -168,21 +240,38 @@ impl Session {
         socket: tokio::net::TcpStream,
         tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
     ) -> Result<(), String> {
-        let mut stream: Box<dyn Stream> = Box::new(socket);
-        write(&mut stream, &format!("220 {} ESMTP Ortus\r\n", self.host)).await?;
+        let stream: Box<dyn Stream> = match (&self.mode, &tls) {
+            // Port 465: TLS from the first byte.
+            (Mode::Submission { implicit_tls: true }, Some(config)) => {
+                let accepted = tokio_rustls::TlsAcceptor::from(Arc::clone(config))
+                    .accept(socket)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                self.secure = true;
+                Box::new(accepted)
+            }
+            (Mode::Submission { implicit_tls: true }, None) => {
+                return Err("port 465 needs a TLS certificate".into())
+            }
+            _ => Box::new(socket),
+        };
+        // One reader for the whole session, so pipelined commands are kept.
+        let mut reader = BufReader::new(stream);
+        write(
+            reader.get_mut(),
+            &format!("220 {} ESMTP Ortus\r\n", self.host),
+        )
+        .await?;
         loop {
-            let mut reader = BufReader::new(stream);
             let line = match tokio::time::timeout(COMMAND_TIMEOUT, read_line(&mut reader)).await {
                 Ok(Ok(Some(line))) => line,
                 Ok(Ok(None)) => return Ok(()),
                 Ok(Err(e)) => {
-                    let mut stream = reader.into_inner();
-                    let _ = write(&mut stream, "500 5.5.2 Line too long\r\n").await;
+                    let _ = write(reader.get_mut(), "500 5.5.2 Line too long\r\n").await;
                     return Err(e);
                 }
                 Err(_) => {
-                    let mut stream = reader.into_inner();
-                    let _ = write(&mut stream, "421 4.4.2 Too slow, closing\r\n").await;
+                    let _ = write(reader.get_mut(), "421 4.4.2 Too slow, closing\r\n").await;
                     return Ok(());
                 }
             };
@@ -190,11 +279,11 @@ impl Session {
                 .split_once(' ')
                 .map_or((line.as_str(), ""), |(v, a)| (v, a.trim()));
             let verb = verb.to_ascii_uppercase();
-            match verb.as_str() {
+            let reply = match verb.as_str() {
                 "EHLO" | "HELO" => {
                     self.helo = Some(argument.to_string());
                     self.reset();
-                    let reply = if verb == "EHLO" {
+                    if verb == "EHLO" {
                         let mut lines = vec![
                             format!("250-{} greets {}", self.host, argument),
                             format!("250-SIZE {}", max_size()),
@@ -205,86 +294,173 @@ impl Session {
                         if self.tls_offered && !self.secure {
                             lines.push("250-STARTTLS".into());
                         }
+                        // Passwords only over TLS.
+                        if matches!(self.mode, Mode::Submission { .. }) && self.secure {
+                            lines.push("250-AUTH PLAIN LOGIN".into());
+                        }
                         lines.push("250 SMTPUTF8".into());
                         lines.join("\r\n") + "\r\n"
                     } else {
                         format!("250 {}\r\n", self.host)
-                    };
-                    stream = reader.into_inner();
-                    write(&mut stream, &reply).await?;
+                    }
                 }
                 "STARTTLS" if self.tls_offered && !self.secure => {
-                    stream = reader.into_inner();
-                    write(&mut stream, "220 2.0.0 Ready to start TLS\r\n").await?;
+                    write(reader.get_mut(), "220 2.0.0 Ready to start TLS\r\n").await?;
+                    // Anything sent before the handshake is dropped (RFC 3207).
+                    let plain = reader.into_inner();
                     let config = tls.clone().ok_or("no TLS")?;
                     let accepted = tokio_rustls::TlsAcceptor::from(config)
-                        .accept(stream)
+                        .accept(plain)
                         .await
                         .map_err(|e| e.to_string())?;
-                    stream = Box::new(accepted);
+                    reader = BufReader::new(Box::new(accepted));
                     self.secure = true;
                     self.helo = None;
+                    self.user = None;
                     self.reset();
+                    continue;
                 }
-                "MAIL" => {
-                    stream = reader.into_inner();
-                    let reply = self.mail(argument);
-                    write(&mut stream, &reply).await?;
-                }
-                "RCPT" => {
-                    stream = reader.into_inner();
-                    let reply = self.rcpt(argument).await;
-                    write(&mut stream, &reply).await?;
-                }
+                "AUTH" => self.auth(argument, &mut reader).await?,
+                "MAIL" => self.mail(argument),
+                "RCPT" => self.rcpt(argument).await,
+                "DATA" if self.to.is_empty() => "503 5.5.1 RCPT first\r\n".into(),
                 "DATA" => {
-                    if self.to.is_empty() {
-                        stream = reader.into_inner();
-                        write(&mut stream, "503 5.5.1 RCPT first\r\n").await?;
-                        continue;
-                    }
-                    {
-                        let inner = reader.get_mut();
-                        write(inner, "354 End data with <CR><LF>.<CR><LF>\r\n").await?;
-                    }
-                    let data = read_data(&mut reader, max_size()).await;
-                    stream = reader.into_inner();
-                    let reply = match data {
-                        Ok(Some(message)) => self.receive(message).await,
-                        Ok(None) => "552 5.3.4 Message too big\r\n".to_string(),
-                        Err(e) => return Err(e),
+                    write(reader.get_mut(), "354 End data with <CR><LF>.<CR><LF>\r\n").await?;
+                    let reply = match read_data(&mut reader, max_size()).await? {
+                        Some(message) if matches!(self.mode, Mode::Submission { .. }) => {
+                            self.submit(message).await
+                        }
+                        Some(message) => self.receive(message).await,
+                        None => "552 5.3.4 Message too big\r\n".to_string(),
                     };
                     self.reset();
-                    write(&mut stream, &reply).await?;
+                    reply
                 }
                 "RSET" => {
                     self.reset();
-                    stream = reader.into_inner();
-                    write(&mut stream, "250 2.0.0 OK\r\n").await?;
+                    "250 2.0.0 OK\r\n".into()
                 }
-                "NOOP" => {
-                    stream = reader.into_inner();
-                    write(&mut stream, "250 2.0.0 OK\r\n").await?;
-                }
-                "VRFY" => {
-                    stream = reader.into_inner();
-                    write(&mut stream, "252 2.1.5 Send some mail and see\r\n").await?;
-                }
+                "NOOP" => "250 2.0.0 OK\r\n".into(),
+                "VRFY" => "252 2.1.5 Send some mail and see\r\n".into(),
                 "QUIT" => {
-                    stream = reader.into_inner();
-                    write(&mut stream, "221 2.0.0 Bye\r\n").await?;
+                    write(reader.get_mut(), "221 2.0.0 Bye\r\n").await?;
                     return Ok(());
                 }
-                _ => {
-                    stream = reader.into_inner();
-                    write(&mut stream, "502 5.5.1 Not here\r\n").await?;
-                }
+                _ => "502 5.5.1 Not here\r\n".into(),
+            };
+            write(reader.get_mut(), &reply).await?;
+        }
+    }
+
+    /// AUTH PLAIN or LOGIN with an app password, over TLS only.
+    async fn auth(
+        &mut self,
+        argument: &str,
+        reader: &mut BufReader<Box<dyn Stream>>,
+    ) -> Result<String, String> {
+        if !matches!(self.mode, Mode::Submission { .. }) {
+            return Ok("502 5.5.1 Not here\r\n".into());
+        }
+        if !self.secure {
+            return Ok("538 5.7.11 Encryption required: STARTTLS first\r\n".into());
+        }
+        if self.user.is_some() {
+            return Ok("503 5.5.1 Already signed in\r\n".into());
+        }
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let (mechanism, initial) = argument
+            .split_once(' ')
+            .map_or((argument, None), |(m, i)| (m, Some(i.trim().to_string())));
+        let (user, password) = match mechanism.to_ascii_uppercase().as_str() {
+            "PLAIN" => {
+                let response = match initial {
+                    Some(i) => i,
+                    None => {
+                        write(reader.get_mut(), "334 \r\n").await?;
+                        read_line(reader).await?.unwrap_or_default()
+                    }
+                };
+                let decoded = b64.decode(response.trim()).unwrap_or_default();
+                let mut parts = decoded.split(|b| *b == 0);
+                let (_authz, user, password) = (parts.next(), parts.next(), parts.next());
+                (
+                    String::from_utf8_lossy(user.unwrap_or_default()).into_owned(),
+                    String::from_utf8_lossy(password.unwrap_or_default()).into_owned(),
+                )
             }
+            "LOGIN" => {
+                write(reader.get_mut(), "334 VXNlcm5hbWU6\r\n").await?;
+                let user = read_line(reader).await?.unwrap_or_default();
+                write(reader.get_mut(), "334 UGFzc3dvcmQ6\r\n").await?;
+                let password = read_line(reader).await?.unwrap_or_default();
+                (
+                    String::from_utf8_lossy(&b64.decode(user.trim()).unwrap_or_default())
+                        .into_owned(),
+                    String::from_utf8_lossy(&b64.decode(password.trim()).unwrap_or_default())
+                        .into_owned(),
+                )
+            }
+            _ => return Ok("504 5.5.4 PLAIN or LOGIN\r\n".into()),
+        };
+        match ortus_core::auth::app_passwords::authenticate(
+            &self.instance,
+            &user,
+            &password,
+            &self.peer.ip().to_string(),
+        )
+        .await
+        {
+            Ok(user) => {
+                self.user = Some(user.id);
+                Ok("235 2.7.0 Signed in\r\n".into())
+            }
+            Err(ortus_core::auth::app_passwords::Refused::Blocked(_)) => {
+                Ok("454 4.7.0 Too many tries; wait a while\r\n".into())
+            }
+            Err(ortus_core::auth::app_passwords::Refused::Wrong) => {
+                Ok("535 5.7.8 That address and app password do not match\r\n".into())
+            }
+        }
+    }
+
+    /// A message from a signed-in app: sent as the web would send it.
+    async fn submit(&mut self, message: Vec<u8>) -> String {
+        let (Some(user), Some(from)) = (self.user.clone(), self.from.clone()) else {
+            return "530 5.7.0 Sign in first\r\n".into();
+        };
+        let to: Vec<String> = self.to.iter().map(|(address, _)| address.clone()).collect();
+        let out = crate::send::Outgoing {
+            user: &user,
+            from: &from,
+            to: &to,
+            raw: &message,
+            label: None,
+            reason: None,
+        };
+        match crate::send::send(&self.instance, &out).await {
+            Ok(_) => "250 2.0.0 OK sent\r\n".into(),
+            Err(crate::send::Refused::NotYourAddress) => {
+                "553 5.7.1 That is not your address\r\n".into()
+            }
+            Err(crate::send::Refused::BadRecipient { address }) => {
+                format!("553 5.1.3 Bad recipient {address}\r\n")
+            }
+            Err(crate::send::Refused::Policy { address, .. }) => {
+                format!("550 5.7.1 Its label does not let it go to {address}\r\n")
+            }
+            Err(crate::send::Refused::NeedsReason { address, .. }) => format!(
+                "550 5.7.1 To send it to {address}, give a reason: send it from the web\r\n"
+            ),
+            Err(crate::send::Refused::Failed) => "451 4.3.0 Try again later\r\n".into(),
         }
     }
 
     fn mail(&mut self, argument: &str) -> String {
         if self.helo.is_none() {
             return "503 5.5.1 EHLO first\r\n".into();
+        }
+        if matches!(self.mode, Mode::Submission { .. }) && self.user.is_none() {
+            return "530 5.7.0 Sign in first (AUTH)\r\n".into();
         }
         if self.from.is_some() {
             return "503 5.5.1 One MAIL per message\r\n".into();
@@ -325,6 +501,11 @@ impl Session {
         }
         if self.to.len() >= MAX_RECIPIENTS {
             return "452 4.5.3 Too many recipients\r\n".into();
+        }
+        if matches!(self.mode, Mode::Submission { .. }) {
+            // A signed-in app may write to anyone; sending decides the rest.
+            self.to.push((address, String::new()));
+            return "250 2.1.5 OK\r\n".into();
         }
         let store = self.instance.store.as_ref();
         match store::recipient(store, &address).await {

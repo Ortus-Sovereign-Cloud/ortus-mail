@@ -61,11 +61,18 @@ impl App for Mail {
     }
 
     fn role_tasks(&self) -> Vec<RoleTask> {
-        vec![RoleTask {
-            role: ortus_core::config::Role::Mail,
-            name: "smtp",
-            run: smtp::run,
-        }]
+        vec![
+            RoleTask {
+                role: ortus_core::config::Role::Mail,
+                name: "smtp",
+                run: smtp::run,
+            },
+            RoleTask {
+                role: ortus_core::config::Role::Mail,
+                name: "submission",
+                run: smtp::run_submission,
+            },
+        ]
     }
 
     fn periodic(&self) -> Vec<(&'static str, i64)> {
