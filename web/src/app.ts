@@ -5,6 +5,8 @@ import "./compose.js";
 import "./deliverability.js";
 import "./domains.js";
 import "./inbox.js";
+import "./migrations.js";
+import "./reconnect.js";
 import { navigate, type Toast } from "./events.js";
 import { ready, t } from "./i18n.js";
 import { jmap } from "./jmap.js";
@@ -105,9 +107,9 @@ export class OrtusMailApp extends LitElement {
   }
 
   override render() {
-    const compose = this.path === "/mail/compose";
+    const screen = this.path === "/mail/compose" ? html`<ortus-mail-compose></ortus-mail-compose>` : this.path.startsWith("/mail/reconnect/") ? html`<ortus-mail-reconnect></ortus-mail-reconnect>` : html`<ortus-mail-inbox></ortus-mail-inbox>`;
     return html`
-      ${compose ? html`<ortus-mail-compose></ortus-mail-compose>` : html`<ortus-mail-inbox></ortus-mail-inbox>`}
+      ${screen}
       ${this.toast
         ? html`<div class="toast ${this.toast.undo ? "" : "plain"}" role="status">
             <span>${this.toast.text}</span>

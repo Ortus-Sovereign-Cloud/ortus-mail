@@ -7,6 +7,7 @@ pub mod admin;
 pub mod compose;
 pub mod domains;
 pub mod imap;
+pub mod import;
 pub mod jmap;
 pub mod later;
 pub mod reports;
@@ -57,6 +58,7 @@ impl App for Mail {
         all.extend(jmap::routes());
         all.extend(compose::routes());
         all.extend(reports::routes());
+        all.extend(import::routes());
         all
     }
 
@@ -71,6 +73,11 @@ impl App for Mail {
                 path: "/admin/deliverability",
                 element: "ortus-mail-deliverability",
                 label: "deliverability",
+            },
+            AdminSection {
+                path: "/admin/migrations",
+                element: "ortus-mail-migrations",
+                label: "migrations",
             },
         ]
     }
@@ -91,6 +98,23 @@ impl App for Mail {
                 role: ortus_core::config::Role::Mail,
                 name: "imap",
                 run: imap::run,
+            },
+        ]
+    }
+
+    fn sealed(&self) -> Vec<ortus_core::secrets::Place> {
+        vec![
+            ortus_core::secrets::Place {
+                table: "mail_domains",
+                id: "domain",
+                column: "dkim_key",
+                fields: &["rsa", "ed25519"],
+            },
+            ortus_core::secrets::Place {
+                table: "mail_import_accounts",
+                id: "id",
+                column: "password",
+                fields: &[],
             },
         ]
     }
@@ -142,7 +166,8 @@ impl App for Mail {
     }
 
     fn outside_jobs(&self, instance: &Arc<Instance>) -> Vec<OutsideJobKind> {
-        let (deliver, later, wake) = (
+        let (deliver, later, wake, import) = (
+            Arc::clone(instance),
             Arc::clone(instance),
             Arc::clone(instance),
             Arc::clone(instance),
@@ -160,6 +185,13 @@ impl App for Mail {
                 handler: Box::new(move |job| {
                     let instance = Arc::clone(&later);
                     Box::pin(async move { later::run(&instance, job).await })
+                }),
+            },
+            OutsideJobKind {
+                kind: import::IMPORT_JOB.into(),
+                handler: Box::new(move |job| {
+                    let instance = Arc::clone(&import);
+                    Box::pin(async move { import::run(&instance, job).await })
                 }),
             },
             OutsideJobKind {

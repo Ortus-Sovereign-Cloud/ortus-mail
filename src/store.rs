@@ -161,6 +161,37 @@ pub const MIGRATIONS: &[Migration] = &[
     );
     CREATE INDEX mail_dmarc_rows_report ON mail_dmarc_rows (report)",
     },
+    Migration {
+        version: 7,
+        name: "mailbox imports from old servers",
+        sql: "CREATE TABLE mail_imports (
+        id TEXT PRIMARY KEY,
+        host TEXT NOT NULL,
+        port BIGINT NOT NULL,
+        security TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at BIGINT NOT NULL
+    );
+    CREATE TABLE mail_import_accounts (
+        id TEXT PRIMARY KEY,
+        import_id TEXT NOT NULL REFERENCES mail_imports (id),
+        login TEXT NOT NULL,
+        password TEXT,
+        target_user TEXT NOT NULL,
+        state TEXT NOT NULL,
+        error TEXT,
+        copied BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+    );
+    CREATE INDEX mail_import_accounts_import ON mail_import_accounts (import_id);
+    CREATE TABLE mail_import_seen (
+        account TEXT NOT NULL,
+        folder TEXT NOT NULL,
+        validity BIGINT NOT NULL,
+        uid BIGINT NOT NULL,
+        PRIMARY KEY (account, folder, validity, uid)
+    )",
+    },
 ];
 
 /// The mailboxes everyone has, by role, with their IMAP names.
@@ -755,6 +786,8 @@ pub async fn forget(tx: &mut dyn AsyncTx, user_id: &str) -> StoreResult<Vec<Stri
         "DELETE FROM mail_outbound WHERE user_id = $1",
         "DELETE FROM mail_scheduled WHERE user_id = $1",
         "DELETE FROM mail_snoozed WHERE user_id = $1",
+        "DELETE FROM mail_import_seen WHERE account IN (SELECT id FROM mail_import_accounts WHERE target_user = $1)",
+        "DELETE FROM mail_import_accounts WHERE target_user = $1",
     ] {
         tx.execute(sql, &[user_id.into()]).await?;
     }
