@@ -512,6 +512,7 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
                 | "hasAttachment"
                 | "ortusCategory"
                 | "ortusVerified"
+                | "ortusSnoozedUntil"
         )
     });
     let found = stored(ctx, &ids).await?;
@@ -559,6 +560,9 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
                 "hasAttachment" => json!(s.attachments > 0),
                 "ortusCategory" => json!(s.category),
                 "ortusVerified" => json!(s.verified),
+                "ortusSnoozedUntil" => store::snoozed_until(ctx.store(), &ctx.user.id, &s.id)
+                    .await?
+                    .map_or(Value::Null, |t| json!(utc(t))),
                 _ => {
                     let Some(m) = &parsed else {
                         email.insert(p.clone(), Value::Null);
@@ -834,8 +838,15 @@ async fn email_update(
     };
     let mut keywords: Vec<String> = s.keywords.clone();
     let mut mailboxes: Vec<String> = s.mailboxes.iter().map(|(m, _)| m.clone()).collect();
+    // Some(Some(t)): snooze until t; Some(None): wake it now.
+    let mut snooze: Option<Option<i64>> = None;
     for (path, value) in patch {
-        if path == "keywords" {
+        if path == "ortusSnoozedUntil" {
+            snooze = Some(match value {
+                Value::Null => None,
+                v => Some(v.as_str().and_then(parse_utc).filter(|t| *t > ortus_core::program::now_ms()).ok_or_else(|| json!({"type": "invalidProperties", "properties": ["ortusSnoozedUntil"]}))?),
+            });
+        } else if path == "keywords" {
             keywords = value
                 .as_object()
                 .ok_or_else(|| json!({"type": "invalidPatch"}))?
@@ -878,6 +889,27 @@ async fn email_update(
     let flags: Vec<String> = keywords.iter().map(|k| flag_of(k)).collect();
     let flag_refs: Vec<&str> = flags.iter().map(String::as_str).collect();
     let fail = |_| json!({"type": "serverFail"});
+    if let Some(snooze) = snooze {
+        match snooze {
+            Some(until) => {
+                store::snooze(ctx.instance, &ctx.user.id, &s.id, until)
+                    .await
+                    .map_err(fail)?;
+            }
+            None => {
+                store::unsnooze(ctx.store(), &ctx.user.id, &s.id)
+                    .await
+                    .map_err(fail)?;
+                let inbox = store::by_role(ctx.store(), &ctx.user.id, "inbox")
+                    .await
+                    .map_err(fail)?;
+                store::move_message(ctx.instance, &ctx.user.id, &s.id, &inbox.id)
+                    .await
+                    .map_err(fail)?;
+            }
+        }
+        return set_keywords(ctx, &s.id, &flag_refs).await;
+    }
     // Into new folders first (a copy keeps the flags), then out of old ones.
     let (first_box, first_uid) = s.mailboxes[0].clone();
     for m in &mailboxes {
@@ -892,21 +924,27 @@ async fn email_update(
             store::expunge(ctx.instance, m, *uid).await.map_err(fail)?;
         }
     }
+    set_keywords(ctx, &s.id, &flag_refs).await
+}
+
+/// Sets the flags of every entry of a message to `flag_refs`.
+async fn set_keywords(ctx: &Ctx<'_>, message: &str, flag_refs: &[&str]) -> Result<(), Value> {
+    let fail = |_| json!({"type": "serverFail"});
     for row in ctx
         .store()
         .query(
             "SELECT mailbox_id, uid, flags FROM mail_entries WHERE message = $1",
-            &[s.id.as_str().into()],
+            &[message.into()],
         )
         .await
         .map_err(fail)?
     {
-        if row.text(2).unwrap_or_default() != store::normal_flags(&flag_refs) {
+        if row.text(2).unwrap_or_default() != store::normal_flags(flag_refs) {
             store::set_flags(
                 ctx.store(),
                 row.text(0).unwrap_or_default(),
                 row.int(1).unwrap_or(0),
-                &flag_refs,
+                flag_refs,
             )
             .await
             .map_err(fail)?;
@@ -922,8 +960,37 @@ async fn destroy_email(ctx: &Ctx<'_>, s: &Stored) -> Result<(), MethodError> {
     Ok(())
 }
 
-/// A new message (a draft, usually) from the JMAP properties.
-fn compose(ctx: &Ctx<'_>, email: &Value) -> Result<Vec<u8>, Value> {
+/// A header text as RFC 2047 encoded words when it is not plain ASCII.
+fn encoded(text: &str) -> String {
+    use base64::Engine;
+    if text.is_ascii() {
+        return text.to_string();
+    }
+    // Encoded words stay short: split on character boundaries.
+    let mut words = Vec::new();
+    let mut chunk = String::new();
+    for c in text.chars() {
+        if chunk.len() + c.len_utf8() > 45 {
+            words.push(format!(
+                "=?UTF-8?B?{}?=",
+                base64::engine::general_purpose::STANDARD.encode(&chunk)
+            ));
+            chunk.clear();
+        }
+        chunk.push(c);
+    }
+    if !chunk.is_empty() {
+        words.push(format!(
+            "=?UTF-8?B?{}?=",
+            base64::engine::general_purpose::STANDARD.encode(&chunk)
+        ));
+    }
+    words.join("\r\n ")
+}
+
+/// A new message (a draft, usually) from the JMAP properties, with the
+/// attachments it names (uploaded blobs).
+async fn compose(ctx: &Ctx<'_>, email: &Value) -> Result<Vec<u8>, Value> {
     let list = |name: &str| -> String {
         email
             .get(name)
@@ -941,9 +1008,13 @@ fn compose(ctx: &Ctx<'_>, email: &Value) -> Result<Vec<u8>, Value> {
                                 .and_then(Value::as_str)
                                 .filter(|n| !n.is_empty())
                             {
-                                Some(n) => format!(
+                                Some(n) if n.is_ascii() => format!(
                                     "\"{}\" <{address}>",
                                     n.replace(['"', '\\', '\r', '\n'], "")
+                                ),
+                                Some(n) => format!(
+                                    "{} <{address}>",
+                                    encoded(&n.replace(['"', '\\', '\r', '\n'], ""))
                                 ),
                                 None => format!("<{address}>"),
                             },
@@ -988,9 +1059,10 @@ fn compose(ctx: &Ctx<'_>, email: &Value) -> Result<Vec<u8>, Value> {
         .rsplit_once('@')
         .map_or("ortus.local", |(_, d)| d);
     let mut head = format!(
-        "From: {from}\r\nDate: {}\r\nMessage-ID: <{}@{domain}>\r\nSubject: {subject}\r\nMIME-Version: 1.0\r\n",
+        "From: {from}\r\nDate: {}\r\nMessage-ID: <{}@{domain}>\r\nSubject: {}\r\nMIME-Version: 1.0\r\n",
         rfc2822(ortus_core::program::now_ms()),
-        ortus_core::auth::random_hex(16)
+        ortus_core::auth::random_hex(16),
+        encoded(&subject)
     );
     for (header, name) in [
         ("To", "to"),
@@ -1032,7 +1104,70 @@ fn compose(ctx: &Ctx<'_>, email: &Value) -> Result<Vec<u8>, Value> {
         }
         (None, None) => "Content-Type: text/plain; charset=utf-8\r\n\r\n".into(),
     };
-    Ok(format!("{head}{body}").into_bytes())
+    let files = email
+        .get("attachments")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if files.is_empty() {
+        return Ok(format!("{head}{body}").into_bytes());
+    }
+    use base64::Engine;
+    let b = format!("mix{}", ortus_core::auth::random_hex(8));
+    let mut out =
+        format!("{head}Content-Type: multipart/mixed; boundary=\"{b}\"\r\n\r\n--{b}\r\n{body}");
+    for file in &files {
+        let blob = file
+            .get("blobId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let data = blob_bytes(ctx, blob)
+            .await
+            .ok_or_else(|| json!({"type": "blobNotFound", "notFound": [blob]}))?;
+        let kind = file
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|t| {
+                t.len() < 100
+                    && t.split('/').count() == 2
+                    && t.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "/.+-".contains(c))
+            })
+            .unwrap_or("application/octet-stream");
+        let name: String = file
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("attachment")
+            .chars()
+            .filter(|c| !c.is_control() && !matches!(c, '"' | '\\' | '/'))
+            .take(200)
+            .collect();
+        // A name that is not plain ASCII goes as RFC 2231.
+        let name_param = if name.is_ascii() {
+            format!("filename=\"{name}\"")
+        } else {
+            let escaped: String = name
+                .bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() || b".-_".contains(&b) {
+                        (b as char).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect();
+            format!("filename*=UTF-8''{escaped}")
+        };
+        let encoded_data = base64::engine::general_purpose::STANDARD.encode(&data);
+        let lines: Vec<&str> = encoded_data
+            .as_bytes()
+            .chunks(76)
+            .map(|c| std::str::from_utf8(c).unwrap_or_default())
+            .collect();
+        out.push_str(&format!("\r\n--{b}\r\nContent-Type: {kind}\r\nContent-Disposition: attachment; {name_param}\r\nContent-Transfer-Encoding: base64\r\n\r\n{}\r\n", lines.join("\r\n")));
+    }
+    out.push_str(&format!("--{b}--\r\n"));
+    Ok(out.into_bytes())
 }
 
 fn rfc2822(ms: i64) -> String {
@@ -1138,7 +1273,7 @@ async fn email_set(
         let made = async {
             let mailboxes = creation_mailboxes(&boxes, value, created_ids)?;
             let keywords = creation_keywords(value)?;
-            let raw = compose(ctx, value)?;
+            let raw = compose(ctx, value).await?;
             let (id, thread) = store_new(ctx, &raw, &mailboxes, &keywords).await?;
             Ok::<_, Value>(json!({"id": id, "blobId": id, "threadId": thread, "size": raw.len()}))
         }
@@ -1320,7 +1455,20 @@ async fn identities(ctx: &Ctx<'_>) -> Result<Vec<String>, MethodError> {
 }
 
 async fn identity_get(ctx: &Ctx<'_>, _args: &Value) -> Answer {
-    let list: Vec<Value> = identities(ctx).await?.iter().map(|a| json!({"id": a, "name": ctx.user.name, "email": a, "replyTo": null, "bcc": null, "textSignature": "", "htmlSignature": "", "mayDelete": false})).collect();
+    let mut list = Vec::new();
+    for a in identities(ctx).await? {
+        let domain = a.rsplit_once('@').map(|(_, d)| d).unwrap_or_default();
+        // Signed when the domain has its DKIM key.
+        let signed = !ctx
+            .store()
+            .query(
+                "SELECT domain FROM mail_domains WHERE domain = $1 AND dkim_key IS NOT NULL",
+                &[domain.into()],
+            )
+            .await?
+            .is_empty();
+        list.push(json!({"id": a, "name": ctx.user.name, "email": a, "replyTo": null, "bcc": null, "textSignature": "", "htmlSignature": "", "mayDelete": false, "ortusSigned": signed}));
+    }
     Ok(json!({"accountId": ctx.user.id, "state": "1", "list": list, "notFound": []}))
 }
 
@@ -1360,32 +1508,33 @@ async fn submission_set(
                 return Err(json!({"type": "noRecipients"}));
             }
             // Bcc never leaves with the message.
-            let outgoing = strip_bcc(&raw);
+            let outgoing = send::strip_bcc(&raw);
             let label = MessageParser::default().parse(&raw).and_then(|m| m.headers().value("X-Ortus-Label").and_then(|h| h.as_text().map(str::to_string)).map(|t| t.trim().to_string()));
             let reason = value.get("ortusReason").and_then(Value::as_str);
-            let sent = send::send(
-                ctx.instance,
-                &send::Outgoing { user: &ctx.user.id, from: identity, to: &recipients, raw: &outgoing, label: label.as_deref(), reason },
-            )
-            .await
-            .map_err(|refused| match refused {
-                send::Refused::NotYourAddress => json!({"type": "forbiddenFrom"}),
-                send::Refused::BadRecipient { address } => json!({"type": "invalidRecipients", "invalidRecipients": [address]}),
-                send::Refused::Policy { address, decision } => json!({"type": "forbiddenToSend", "description": format!("The label does not let it go to {address}."), "ortusDecision": decision, "ortusAddress": address}),
-                send::Refused::NeedsReason { address, label } => json!({"type": "forbiddenToSend", "description": format!("Sending {label} mail to {address} needs a reason (ortusReason)."), "ortusNeedsReason": true, "ortusAddress": address, "ortusLabel": label}),
-                send::Refused::Failed => json!({"type": "serverFail"}),
-            })?;
+            let out = send::Outgoing { user: &ctx.user.id, from: identity, to: &recipients, raw: &outgoing, label: label.as_deref(), reason };
+            // Later (or with a few seconds to undo): a scheduled submission.
+            let send_at = match value.get("ortusSendAt") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(v.as_str().and_then(parse_utc).ok_or_else(|| json!({"type": "invalidProperties", "properties": ["ortusSendAt"]}))?),
+            };
+            if let Some(send_at) = send_at.filter(|t| *t > ortus_core::program::now_ms()) {
+                let id = crate::later::schedule(ctx.instance, &out, &email_id, send_at).await.map_err(refusal_json)?;
+                return Ok::<_, Value>((json!({"id": id, "undoStatus": "pending", "sendAt": utc(send_at), "emailId": email_id}), None));
+            }
+            let sent = send::send(ctx.instance, &out).await.map_err(refusal_json)?;
             let id = format!("s_{}", ortus_core::auth::random_hex(8));
-            Ok::<_, Value>((json!({"id": id, "undoStatus": "final", "sentEmailId": sent.message}), email_id))
+            Ok::<_, Value>((json!({"id": id, "undoStatus": "final", "sentEmailId": sent.message}), Some(email_id)))
         }
         .await;
         match made {
-            Ok((v, email_id)) => {
+            Ok((v, sent_draft)) => {
                 created_ids.insert(
                     key.clone(),
                     v["id"].as_str().unwrap_or_default().to_string(),
                 );
-                sent_drafts.push((key.clone(), email_id));
+                if let Some(email_id) = sent_draft {
+                    sent_drafts.push((key.clone(), email_id));
+                }
                 created.insert(key.clone(), v);
             }
             Err(e) => {
@@ -1415,30 +1564,96 @@ async fn submission_set(
             json!({"accountId": ctx.user.id, "destroy": drafts}),
         ));
     }
+    // Calling back a scheduled message: {"undoStatus": "canceled"}.
+    let mut updated = Map::new();
+    let mut not_updated = Map::new();
+    for (id, patch) in args
+        .get("update")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        if patch.get("undoStatus").and_then(Value::as_str) != Some("canceled") {
+            not_updated.insert(
+                id.clone(),
+                json!({"type": "invalidProperties", "properties": ["undoStatus"]}),
+            );
+        } else if crate::later::cancel(ctx.store(), &ctx.user.id, id).await? {
+            updated.insert(id.clone(), Value::Null);
+        } else {
+            not_updated.insert(id.clone(), json!({"type": "cannotUnsend"}));
+        }
+    }
     Ok(
-        json!({"accountId": ctx.user.id, "oldState": old_state, "newState": state(ctx.instance, &ctx.user.id).await?, "created": created, "notCreated": not_created, "updated": {}, "destroyed": []}),
+        json!({"accountId": ctx.user.id, "oldState": old_state, "newState": state(ctx.instance, &ctx.user.id).await?, "created": created, "notCreated": not_created, "updated": updated, "notUpdated": not_updated, "destroyed": []}),
     )
 }
 
-fn strip_bcc(raw: &[u8]) -> Vec<u8> {
-    let end = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map_or(raw.len(), |p| p + 2);
-    let head = String::from_utf8_lossy(&raw[..end]);
-    let mut out = String::new();
-    let mut skipping = false;
-    for line in head.split_inclusive("\r\n") {
-        if !line.starts_with([' ', '\t']) {
-            skipping = line.to_ascii_lowercase().starts_with("bcc:");
+fn refusal_json(refused: send::Refused) -> Value {
+    match refused {
+        send::Refused::NotYourAddress => json!({"type": "forbiddenFrom"}),
+        send::Refused::BadRecipient { address } => {
+            json!({"type": "invalidRecipients", "invalidRecipients": [address]})
         }
-        if !skipping {
-            out.push_str(line);
+        send::Refused::Policy { address, decision } => {
+            json!({"type": "forbiddenToSend", "description": format!("The label does not let it go to {address}."), "ortusDecision": decision, "ortusAddress": address})
+        }
+        send::Refused::NeedsReason { address, label } => {
+            json!({"type": "forbiddenToSend", "description": format!("Sending {label} mail to {address} needs a reason (ortusReason)."), "ortusNeedsReason": true, "ortusAddress": address, "ortusLabel": label})
+        }
+        send::Refused::Failed => json!({"type": "serverFail"}),
+    }
+}
+
+fn submission_json(s: &crate::later::Scheduled) -> Value {
+    let undo = match s.state.as_str() {
+        "pending" => "pending",
+        "canceled" => "canceled",
+        _ => "final",
+    };
+    json!({"id": s.id, "identityId": s.identity, "emailId": s.email_id, "sendAt": utc(s.send_at), "undoStatus": undo, "ortusState": s.state, "ortusError": s.error})
+}
+
+/// The person's submissions that are waiting, or that could not go.
+async fn submission_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
+    let mut list = Vec::new();
+    let mut not_found = Vec::new();
+    match ids_arg(args, "ids")? {
+        None => {
+            list = crate::later::list(ctx.store(), &ctx.user.id)
+                .await?
+                .iter()
+                .map(submission_json)
+                .collect()
+        }
+        Some(ids) => {
+            for id in ids {
+                match crate::later::get(ctx.store(), &ctx.user.id, &id).await? {
+                    Some(s) => list.push(submission_json(&s)),
+                    None => not_found.push(id),
+                }
+            }
         }
     }
-    let mut bytes = out.into_bytes();
-    bytes.extend_from_slice(&raw[end..]);
-    bytes
+    Ok(
+        json!({"accountId": ctx.user.id, "state": state(ctx.instance, &ctx.user.id).await?, "list": list, "notFound": not_found}),
+    )
+}
+
+async fn submission_query(ctx: &Ctx<'_>, args: &Value) -> Answer {
+    let wanted = args
+        .get("filter")
+        .and_then(|f| f.get("undoStatus"))
+        .and_then(Value::as_str);
+    let ids: Vec<String> = crate::later::list(ctx.store(), &ctx.user.id)
+        .await?
+        .iter()
+        .filter(|s| wanted.is_none_or(|w| submission_json(s)["undoStatus"] == w))
+        .map(|s| s.id.clone())
+        .collect();
+    Ok(
+        json!({"accountId": ctx.user.id, "queryState": state(ctx.instance, &ctx.user.id).await?, "canCalculateChanges": false, "position": 0, "ids": ids, "total": ids.len()}),
+    )
 }
 
 async fn changes(ctx: &Ctx<'_>, args: &Value, kind: &str) -> Answer {
@@ -1590,6 +1805,8 @@ async fn call(
         "Thread/changes" => changes(ctx, args, "Thread").await,
         "Identity/get" => identity_get(ctx, args).await,
         "EmailSubmission/set" => submission_set(ctx, args, created_ids, follow_up).await,
+        "EmailSubmission/get" => submission_get(ctx, args).await,
+        "EmailSubmission/query" => submission_query(ctx, args).await,
         _ => Err(MethodError("unknownMethod", None)),
     }
 }

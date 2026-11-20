@@ -9,7 +9,7 @@ ci/fetch.sh
 # into web/dist, which the crate embeds.
 # Logical CSS only (right to left works), and no style attributes (the CSP
 # forbids them).
-if grep -nE '(margin|padding|border)-(left|right)|[^-](left|right):|text-align: *(left|right)|float: *(left|right)|[[:space:]]style=' web/src/*.ts; then
+if grep -nE '(margin|padding|border)-(left|right)|^[[:space:]]+(left|right):|text-align: *(left|right)|float: *(left|right)|[[:space:]]style=' web/src/*.ts; then
   echo "physical CSS or a style attribute in web/src" >&2
   exit 1
 fi

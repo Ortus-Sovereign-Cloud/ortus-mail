@@ -67,10 +67,11 @@ export interface Email {
   ortusText?: string;
   ortusVerified?: boolean;
   ortusCategory?: string;
+  ortusSnoozedUntil?: string | null;
 }
 
 export const LIST_PROPERTIES = ["threadId", "subject", "from", "to", "receivedAt", "preview", "keywords", "mailboxIds", "hasAttachment", "ortusCategory"];
-export const READ_PROPERTIES = [...LIST_PROPERTIES, "cc", "replyTo", "messageId", "references", "attachments", "ortusText", "ortusVerified"];
+export const READ_PROPERTIES = [...LIST_PROPERTIES, "cc", "replyTo", "messageId", "references", "attachments", "ortusText", "ortusVerified", "ortusSnoozedUntil"];
 
 /** Labels are keywords of one's own (not the `$` system ones). */
 export function labelsOf(email: Pick<Email, "keywords">): string[] {

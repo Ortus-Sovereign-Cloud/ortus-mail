@@ -5,15 +5,19 @@ import { LitElement, LocalizeController, controls, css, customElement, html, me,
 import { t } from "./i18n.js";
 import { LIST_PROPERTIES, MethodError, READ_PROPERTIES, jmap, labelsOf, type Email, type EmailAddress, type Mailbox } from "./jmap.js";
 import type { MailKey } from "./locales/en.js";
+import { navigate } from "./events.js";
 
 const ICON_ARCHIVE = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4"/></svg>`;
 const ICON_TRASH = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>`;
 const ICON_SEARCH = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>`;
+const ICON_CLOCK = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>`;
 const ICON_SEND = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>`;
 
 const FOLDERS: { role: string; key: MailKey; count: "unread" | "total" | null }[] = [
   { role: "inbox", key: "inbox", count: "unread" },
   { role: "today", key: "today", count: null },
+  { role: "snoozed", key: "snoozed", count: "total" },
+  { role: "scheduled", key: "scheduled", count: "total" },
   { role: "sent", key: "sent", count: null },
   { role: "drafts", key: "drafts", count: "total" },
   { role: "archive", key: "archive", count: null },
@@ -66,6 +70,24 @@ function tone(text: string): string {
 
 function who(a: EmailAddress | undefined | null): string {
   return a?.name || a?.email || "";
+}
+
+/** Snooze choices: later today, tomorrow morning, next Monday morning. */
+function snoozeTimes(now = new Date()): { key: MailKey; at: Date }[] {
+  const later = new Date(now);
+  if (now.getHours() < 17) later.setHours(18, 0, 0, 0);
+  else later.setTime(now.getTime() + 3 * 3_600_000);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  tomorrow.setHours(8, 0, 0, 0);
+  const week = new Date(now);
+  week.setDate(now.getDate() + ((8 - now.getDay()) % 7 || 7));
+  week.setHours(8, 0, 0, 0);
+  return [
+    { key: "laterToday", at: later },
+    { key: "tomorrow", at: tomorrow },
+    { key: "nextWeek", at: week },
+  ];
 }
 
 function startOfToday(): number {
@@ -380,6 +402,56 @@ export class OrtusMailInbox extends LitElement {
       .icon:hover {
         background: var(--ortus-hover);
       }
+      .snooze {
+        position: relative;
+      }
+      .menu {
+        position: absolute;
+        inset-block-start: 46px;
+        inset-inline-end: 0;
+        z-index: 3;
+        display: flex;
+        flex-direction: column;
+        min-inline-size: 230px;
+        padding: 6px;
+        border-radius: 12px;
+        border: 1px solid var(--ortus-line-strong);
+        background: var(--ortus-surface-2);
+      }
+      .menu button {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        border: 0;
+        border-radius: 8px;
+        background: none;
+        color: var(--ortus-text);
+        font: inherit;
+        font-size: 14px;
+        text-align: start;
+        cursor: pointer;
+      }
+      .menu button:hover {
+        background: var(--ortus-hover);
+      }
+      .menu small {
+        color: var(--ortus-text-3);
+      }
+      .banner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-block-end: 20px;
+        padding: 12px 16px;
+        border-radius: 12px;
+        background: #1c2240;
+        font-size: 14px;
+      }
+      .banner.bad {
+        background: #2a1617;
+      }
       .meta {
         display: flex;
         gap: 8px;
@@ -612,6 +684,8 @@ export class OrtusMailInbox extends LitElement {
   @state() private replyText = "";
   @state() private replyNote: { error: boolean; text: string } | null = null;
   @state() private sending = false;
+  @state() private scheduled: { id: string; emailId: string; sendAt: string; ortusState: string; ortusError: string | null }[] = [];
+  @state() private snoozeOpen = false;
   private person: Me | undefined;
   private events: EventSource | undefined;
   private loads = 0;
@@ -677,6 +751,8 @@ export class OrtusMailInbox extends LitElement {
       all.push({ hasKeyword: label });
     } else if (box === "today") {
       all.push({ inMailbox: this.boxId("inbox"), after: new Date(startOfToday()).toISOString().replace(/\.\d+Z$/, "Z") });
+    } else if (box === "scheduled") {
+      all.push({ inMailbox: this.boxId("drafts") });
     } else if (!q) {
       const id = this.boxes.find((b) => b.id === box || b.role === box)?.id;
       if (id) all.push({ inMailbox: id });
@@ -691,6 +767,7 @@ export class OrtusMailInbox extends LitElement {
       if (!quiet) this.failed = false;
       const first = await jmap([
         ["Mailbox/get", {}, "b"],
+        ["EmailSubmission/get", { ids: null }, "sub"],
         ["Email/query", { filter: { notKeyword: "$deleted" }, limit: 500 }, "k"],
         ["Email/get", { "#ids": { resultOf: "k", name: "Email/query", path: "/ids" }, properties: ["keywords"] }, "kw"],
       ]);
@@ -699,6 +776,7 @@ export class OrtusMailInbox extends LitElement {
       const seen = new Set<string>();
       for (const e of (first.kw!.list as Email[]) ?? []) for (const l of labelsOf(e)) seen.add(l);
       this.labels = [...seen].sort();
+      this.scheduled = (first.sub!.list as OrtusMailInbox["scheduled"]) ?? [];
       const inbox = this.boxId("inbox");
       const answers = await jmap([
         ["Email/query", { filter: this.filter(), sort: [{ property: "receivedAt", isAscending: false }], collapseThreads: true, limit: 100 }, "q"],
@@ -708,6 +786,12 @@ export class OrtusMailInbox extends LitElement {
       ]);
       if (ticket !== this.loads) return;
       let emails = (answers.l!.list as Email[]) ?? [];
+      if (this.place.box === "scheduled" && !this.place.q && !this.place.label) {
+        const ids = this.scheduled.map((x) => x.emailId);
+        const got = ids.length ? await jmap([["Email/get", { ids, properties: LIST_PROPERTIES }, "s"]]) : { s: { list: [] } };
+        if (ticket !== this.loads) return;
+        emails = (got.s!.list as Email[]) ?? [];
+      }
       if (this.place.only) emails = emails.filter((e) => this.place.only!.includes(e.id));
       this.emails = emails;
       const mine = this.person?.email.toLowerCase();
@@ -748,6 +832,12 @@ export class OrtusMailInbox extends LitElement {
     if (date.getTime() >= startOfToday()) return new Intl.DateTimeFormat(lang, { hour: "2-digit", minute: "2-digit" }).format(date);
     if (date.getTime() >= startOfToday() - 6 * 86_400_000) return new Intl.DateTimeFormat(lang, { weekday: "short" }).format(date);
     return new Intl.DateTimeFormat(lang, { day: "numeric", month: "short" }).format(date);
+  }
+
+  /** The time shown in the list: when it comes or goes, for Scheduled. */
+  private timeFor(e: Email): string {
+    const pending = this.scheduled.find((x) => x.emailId === e.id);
+    return pending && this.place.box === "scheduled" ? this.when(pending.sendAt) : this.when(e.receivedAt);
   }
 
   private size(bytes: number): string {
@@ -807,14 +897,17 @@ export class OrtusMailInbox extends LitElement {
   private folders() {
     const count = (role: string, kind: "unread" | "total" | null) => {
       const b = this.boxes.find((x) => x.role === role);
-      const n = !b || !kind ? 0 : kind === "unread" ? b.unreadEmails : b.totalEmails;
+      const n = role === "scheduled" ? this.scheduled.length : !b || !kind ? 0 : kind === "unread" ? b.unreadEmails : b.totalEmails;
       return n > 0 ? html`<span class="count">${n}</span>` : nothing;
     };
     const current = (role: string) => (!this.place.q && !this.place.label && this.place.box === role ? "page" : nothing);
     const own = this.boxes.filter((b) => !b.role);
     return html`
       <nav class="folders" aria-label=${t(this.localize, "folders")}>
-        <a class="new" href="/mail/compose">${t(this.localize, "newMessage")}</a>
+        <a class="new" href="/mail/compose" @click=${(e: Event) => {
+          e.preventDefault();
+          navigate("/mail/compose");
+        }}>${t(this.localize, "newMessage")}</a>
         ${FOLDERS.map(
           (f) => html`<button class="folder" aria-current=${current(f.role)} @click=${() => this.go({ box: f.role, label: null, q: "", thread: null, only: null, tab: "important" })}>
             <span>${t(this.localize, f.key)}</span>${count(f.role, f.count)}
@@ -873,7 +966,7 @@ export class OrtusMailInbox extends LitElement {
         <p>${this.place.q ? t(this.localize, "noResultsLead") : t(this.localize, "emptyLead")}</p>
       </div>`;
     }
-    const sent = this.place.box === "sent" || this.place.box === "drafts";
+    const sent = ["sent", "drafts", "scheduled"].includes(this.place.box);
     return html`<ul class="list" role="list">
       ${repeat(
         this.emails,
@@ -882,10 +975,10 @@ export class OrtusMailInbox extends LitElement {
           const person = sent ? who(e.to?.[0]) : who(e.from?.[0]);
           const labels = labelsOf(e);
           return html`<li>
-            <button class="item ${e.keywords.$seen ? "" : "unread"}" aria-current=${this.place.thread === e.threadId ? "true" : nothing} @click=${() => this.go({ thread: e.threadId })}>
+            <button class="item ${e.keywords.$seen ? "" : "unread"}" aria-current=${this.place.thread === e.threadId ? "true" : nothing} @click=${() => (this.place.box === "drafts" ? navigate(`/mail/compose?draft=${encodeURIComponent(e.id)}`) : this.go({ thread: e.threadId }))}>
               <span class="avatar ${tone(person)}" aria-hidden="true">${initials(person)}</span>
               <span class="from" dir="auto">${e.keywords.$seen ? nothing : html`<span class="sr">${t(this.localize, "unread")}</span>`}${person || t(this.localize, "noSender")}</span>
-              <span class="time">${this.when(e.receivedAt)}</span>
+              <span class="time">${this.timeFor(e)}</span>
               <span class="subject" dir="auto">${e.subject || t(this.localize, "noSubject")}</span>
               <span>${labels[0] ? html`<span class="chip ${tone(labels[0])}">${this.label(labels[0])}</span>` : nothing}</span>
             </button>
@@ -911,6 +1004,14 @@ export class OrtusMailInbox extends LitElement {
         <div class="title">
           <h2 id="thread-title" dir="auto">${last.subject || t(this.localize, "noSubject")}</h2>
           <div class="actions">
+            <div class="snooze">
+              <button class="icon" aria-label=${t(this.localize, "snooze")} title=${t(this.localize, "snooze")} aria-haspopup="menu" aria-expanded=${this.snoozeOpen ? "true" : "false"} @click=${() => (this.snoozeOpen = !this.snoozeOpen)}>${ICON_CLOCK}</button>
+              ${this.snoozeOpen
+                ? html`<div class="menu" role="menu" aria-label=${t(this.localize, "snooze")}>
+                    ${snoozeTimes().map((s) => html`<button role="menuitem" @click=${() => this.snooze(s.at)}>${t(this.localize, s.key)}<small>${this.when(s.at.toISOString())}</small></button>`)}
+                  </div>`
+                : nothing}
+            </div>
             <button class="icon" aria-label=${t(this.localize, "archiveIt")} title=${t(this.localize, "archiveIt")} @click=${() => this.move("archive")}>${ICON_ARCHIVE}</button>
             <button class="icon" aria-label=${t(this.localize, inTrash ? "deleteForever" : "moveToTrash")} title=${t(this.localize, inTrash ? "deleteForever" : "moveToTrash")} @click=${() => (inTrash ? this.destroy() : this.move("trash"))}>${ICON_TRASH}</button>
           </div>
@@ -919,6 +1020,7 @@ export class OrtusMailInbox extends LitElement {
           ${labels.map((l) => html`<span class="chip ${tone(l)}">${this.label(l)}</span>`)}
           <span>${t(this.localize, "messagesCount", { count: thread.length })} · ${t(this.localize, "peopleCount", { count: people.size })}</span>
         </p>
+        ${this.banner(last)}
         ${thread.map((m) => this.message(m))}
         <form class="reply" @submit=${this.reply}>
           <label class="sr" for="reply">${t(this.localize, "replyTo", { name: who(last.replyTo?.[0] ?? last.from?.[0]) })}</label>
@@ -966,6 +1068,50 @@ export class OrtusMailInbox extends LitElement {
           </div>`
         : nothing}
     </article>`;
+  }
+
+  private banner(last: Email) {
+    const pending = this.scheduled.find((x) => this.thread?.some((m) => m.id === x.emailId));
+    if (pending) {
+      const failed = pending.ortusState === "failed";
+      return html`<div class="banner ${failed ? "bad" : ""}" role="status">
+        <span>${failed ? t(this.localize, "couldNotSend") : t(this.localize, "sendsAt", { time: this.when(pending.sendAt) })}</span>
+        ${failed
+          ? html`<button class="button" @click=${() => navigate(`/mail/compose?draft=${encodeURIComponent(pending.emailId)}`)}>${t(this.localize, "editDraft")}</button>`
+          : html`<button class="button" @click=${() => this.cancelScheduled(pending.id, pending.emailId)}>${t(this.localize, "cancelSending")}</button>`}
+      </div>`;
+    }
+    const snoozed = this.boxId("snoozed");
+    if (snoozed && last.mailboxIds[snoozed]) {
+      return html`<div class="banner" role="status">
+        <span>${t(this.localize, "snoozedTill", { time: last.ortusSnoozedUntil ? this.when(last.ortusSnoozedUntil) : "" })}</span>
+        <button class="button" @click=${() => this.wake()}>${t(this.localize, "unsnooze")}</button>
+      </div>`;
+    }
+    return nothing;
+  }
+
+  private async cancelScheduled(id: string, draft: string): Promise<void> {
+    await jmap([["EmailSubmission/set", { update: { [id]: { undoStatus: "canceled" } } }, "c"]]);
+    navigate(`/mail/compose?draft=${encodeURIComponent(draft)}`);
+  }
+
+  private async snooze(at: Date): Promise<void> {
+    this.snoozeOpen = false;
+    if (!this.thread) return;
+    const update: Record<string, unknown> = {};
+    const until = at.toISOString().replace(/\.\d+Z$/, "Z");
+    for (const m of this.thread) update[m.id] = { ortusSnoozedUntil: until };
+    await jmap([["Email/set", { update }, "z"]]);
+    this.go({ thread: null });
+  }
+
+  private async wake(): Promise<void> {
+    if (!this.thread) return;
+    const update: Record<string, unknown> = {};
+    for (const m of this.thread) update[m.id] = { ortusSnoozedUntil: null };
+    await jmap([["Email/set", { update }, "w"]]);
+    this.go({ thread: null });
   }
 
   /** Moves the open thread's messages here out of the folder shown. */

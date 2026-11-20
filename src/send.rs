@@ -134,6 +134,28 @@ async fn sign(instance: &Instance, domain: &str, raw: &[u8]) -> Vec<u8> {
     }
 }
 
+/// The message without its Bcc header: Bcc never leaves with it.
+pub fn strip_bcc(raw: &[u8]) -> Vec<u8> {
+    let end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(raw.len(), |p| p + 2);
+    let head = String::from_utf8_lossy(&raw[..end]);
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in head.split_inclusive("\r\n") {
+        if !line.starts_with([' ', '\t']) {
+            skipping = line.to_ascii_lowercase().starts_with("bcc:");
+        }
+        if !skipping {
+            out.push_str(line);
+        }
+    }
+    let mut bytes = out.into_bytes();
+    bytes.extend_from_slice(&raw[end..]);
+    bytes
+}
+
 /// The label a mail app set in an `X-Ortus-Label` header, if any.
 fn label_header(raw: &[u8]) -> Option<String> {
     let head_end = raw
@@ -150,8 +172,18 @@ fn label_header(raw: &[u8]) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Sends a message. Nothing goes anywhere unless every recipient may get it.
-pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refused> {
+/// Who gets a message: people here (their user ids) and addresses away,
+/// by domain.
+struct Routed {
+    from: String,
+    here: Vec<String>,
+    away: BTreeMap<String, Vec<String>>,
+}
+
+/// Checks the sender and every recipient, and asks the label policy about
+/// everyone outside: `record` writes the decisions to the audit log (when
+/// sending), otherwise nothing is kept (while composing).
+async fn route(instance: &Instance, out: &Outgoing<'_>, record: bool) -> Result<Routed, Refused> {
     let store = instance.store.as_ref();
     let from = out.from.trim().to_ascii_lowercase();
     if store::recipient(store, &from)
@@ -169,8 +201,6 @@ pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refus
         });
     }
     let header_label = label_header(out.raw);
-    // Who is here, who is outside; the policy decides for everyone outside
-    // before anything is stored or sent.
     let mut here = Vec::new();
     let mut away: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for address in out.to {
@@ -202,16 +232,33 @@ pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refus
             object: "mail:outgoing",
             reason: out.reason,
         };
-        match policy::decide(instance, &ask)
-            .await
-            .map_err(|_| Refused::Failed)?
-        {
+        let decision = if record {
+            policy::decide(instance, &ask).await
+        } else {
+            policy::judge(store, &ask)
+                .await
+                .map(|(decision, _, _)| decision)
+        }
+        .map_err(|_| Refused::Failed)?;
+        match decision {
             Decision::Allow { .. } => away.entry(domain_of(&address)).or_default().push(address),
             Decision::NeedsReason { label } => return Err(Refused::NeedsReason { address, label }),
             decision @ Decision::Deny { .. } => return Err(Refused::Policy { address, decision }),
         }
     }
+    Ok(Routed { from, here, away })
+}
 
+/// Whether a message may go as it is, without sending or recording
+/// anything: what compose shows before the person presses Send.
+pub async fn check(instance: &Instance, out: &Outgoing<'_>) -> Result<(), Refused> {
+    route(instance, out, false).await.map(|_| ())
+}
+
+/// Sends a message. Nothing goes anywhere unless every recipient may get it.
+pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refused> {
+    let store = instance.store.as_ref();
+    let Routed { from, here, away } = route(instance, out, true).await?;
     let signed = sign(instance, &domain_of(&from), out.raw).await;
     let sent_box = store::by_role(store, out.user, "sent")
         .await

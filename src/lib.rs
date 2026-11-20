@@ -4,9 +4,11 @@
 //! to a program through [`apps`].
 
 pub mod admin;
+pub mod compose;
 pub mod domains;
 pub mod imap;
 pub mod jmap;
+pub mod later;
 pub mod send;
 pub mod smtp;
 pub mod spam;
@@ -52,6 +54,7 @@ impl App for Mail {
         let mut all = admin::routes();
         all.extend(user::routes());
         all.extend(jmap::routes());
+        all.extend(compose::routes());
         all
     }
 
@@ -84,7 +87,10 @@ impl App for Mail {
     }
 
     fn periodic(&self) -> Vec<(&'static str, i64)> {
-        vec![(domains::CHECK_JOB, 10 * 60 * 1000)]
+        vec![
+            (domains::CHECK_JOB, 10 * 60 * 1000),
+            (store::WAKE_JOB, 60 * 1000),
+        ]
     }
 
     fn jobs(&self, instance: &Arc<Instance>) -> Vec<JobKind> {
@@ -127,14 +133,34 @@ impl App for Mail {
     }
 
     fn outside_jobs(&self, instance: &Arc<Instance>) -> Vec<OutsideJobKind> {
-        let instance = Arc::clone(instance);
-        vec![OutsideJobKind {
-            kind: send::DELIVER_JOB.into(),
-            handler: Box::new(move |job| {
-                let instance = Arc::clone(&instance);
-                Box::pin(async move { send::deliver(instance, job).await })
-            }),
-        }]
+        let (deliver, later, wake) = (
+            Arc::clone(instance),
+            Arc::clone(instance),
+            Arc::clone(instance),
+        );
+        vec![
+            OutsideJobKind {
+                kind: send::DELIVER_JOB.into(),
+                handler: Box::new(move |job| {
+                    let instance = Arc::clone(&deliver);
+                    Box::pin(async move { send::deliver(instance, job).await })
+                }),
+            },
+            OutsideJobKind {
+                kind: later::SEND_LATER_JOB.into(),
+                handler: Box::new(move |job| {
+                    let instance = Arc::clone(&later);
+                    Box::pin(async move { later::run(&instance, job).await })
+                }),
+            },
+            OutsideJobKind {
+                kind: store::WAKE_JOB.into(),
+                handler: Box::new(move |_| {
+                    let instance = Arc::clone(&wake);
+                    Box::pin(async move { store::wake_due(&instance).await })
+                }),
+            },
+        ]
     }
 
     fn purge<'a>(

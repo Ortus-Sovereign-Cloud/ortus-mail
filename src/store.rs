@@ -109,6 +109,31 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "the inbox tab a message belongs to",
         sql: "ALTER TABLE mail_messages ADD COLUMN category TEXT NOT NULL DEFAULT 'important'",
     },
+    Migration {
+        version: 5,
+        name: "send later and snooze",
+        sql: "CREATE TABLE mail_scheduled (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        email_id TEXT NOT NULL,
+        identity TEXT NOT NULL,
+        recipients TEXT NOT NULL,
+        label TEXT,
+        reason TEXT,
+        send_at BIGINT NOT NULL,
+        state TEXT NOT NULL,
+        error TEXT,
+        created_at BIGINT NOT NULL
+    );
+    CREATE INDEX mail_scheduled_user ON mail_scheduled (user_id, state);
+    CREATE TABLE mail_snoozed (
+        user_id TEXT NOT NULL,
+        message TEXT NOT NULL,
+        until BIGINT NOT NULL,
+        PRIMARY KEY (user_id, message)
+    );
+    CREATE INDEX mail_snoozed_until ON mail_snoozed (until)",
+    },
 ];
 
 /// The mailboxes everyone has, by role, with their IMAP names.
@@ -701,6 +726,8 @@ pub async fn forget(tx: &mut dyn AsyncTx, user_id: &str) -> StoreResult<Vec<Stri
         "DELETE FROM mail_addresses WHERE user_id = $1",
         "DELETE FROM mail_senders WHERE user_id = $1",
         "DELETE FROM mail_outbound WHERE user_id = $1",
+        "DELETE FROM mail_scheduled WHERE user_id = $1",
+        "DELETE FROM mail_snoozed WHERE user_id = $1",
     ] {
         tx.execute(sql, &[user_id.into()]).await?;
     }
@@ -971,4 +998,185 @@ pub async fn entry_by_uid(
         .await?
         .into_iter()
         .find(|e| e.uid == uid))
+}
+
+/// The person's mailbox with `role`, made when it is missing (folders
+/// added after the defaults, such as Snoozed).
+pub async fn ensure_role(
+    store: &dyn AsyncStore,
+    user_id: &str,
+    role: &str,
+    name: &str,
+) -> StoreResult<Mailbox> {
+    let boxes = mailboxes(store, user_id).await?;
+    if let Some(found) = boxes.into_iter().find(|m| m.role.as_deref() == Some(role)) {
+        return Ok(found);
+    }
+    let validity = (now() / 1000) & 0x7fff_ffff;
+    // A folder of one's own may already have the name: the role's gets a suffix.
+    let taken = !store
+        .query(
+            "SELECT id FROM mail_mailboxes WHERE user_id = $1 AND name = $2",
+            &[user_id.into(), name.into()],
+        )
+        .await?
+        .is_empty();
+    let name = if taken {
+        format!("{name} (Ortus)")
+    } else {
+        name.to_string()
+    };
+    store
+        .execute(
+            "INSERT INTO mail_mailboxes (id, user_id, name, role, uid_validity, uid_next, modseq, created_at) VALUES ($1, $2, $3, $4, $5, 1, 1, $6) ON CONFLICT (user_id, name) DO NOTHING",
+            &[new_id("mb_").into(), user_id.into(), name.as_str().into(), role.into(), validity.into(), now().into()],
+        )
+        .await?;
+    mailboxes(store, user_id)
+        .await?
+        .into_iter()
+        .find(|m| m.role.as_deref() == Some(role))
+        .ok_or_else(|| StoreError::Database("no such mailbox".into()))
+}
+
+/// Moves a person's message into one mailbox, out of all the others.
+pub async fn move_message(
+    instance: &Instance,
+    user_id: &str,
+    message: &str,
+    to: &str,
+) -> StoreResult<bool> {
+    let store = instance.store.as_ref();
+    let entries = store
+        .query(
+            "SELECT e.mailbox_id, e.uid FROM mail_entries e JOIN mail_mailboxes b ON b.id = e.mailbox_id WHERE e.message = $1 AND b.user_id = $2",
+            &[message.into(), user_id.into()],
+        )
+        .await?;
+    let Some(first) = entries.first() else {
+        return Ok(false);
+    };
+    let placed: Vec<(String, i64)> = entries
+        .iter()
+        .map(|r| {
+            (
+                r.text(0).unwrap_or_default().to_string(),
+                r.int(1).unwrap_or(0),
+            )
+        })
+        .collect();
+    if !placed.iter().any(|(m, _)| m == to) {
+        copy(
+            store,
+            first.text(0).unwrap_or_default(),
+            first.int(1).unwrap_or(0),
+            to,
+        )
+        .await?;
+    }
+    for (m, uid) in placed {
+        if m != to {
+            expunge(instance, &m, uid).await?;
+        }
+    }
+    Ok(true)
+}
+
+/// Snoozes a message until `until` (Unix ms): it waits in Snoozed.
+pub async fn snooze(
+    instance: &Instance,
+    user_id: &str,
+    message: &str,
+    until: i64,
+) -> StoreResult<bool> {
+    let store = instance.store.as_ref();
+    let snoozed = ensure_role(store, user_id, "snoozed", "Snoozed").await?;
+    if !move_message(instance, user_id, message, &snoozed.id).await? {
+        return Ok(false);
+    }
+    store
+        .execute(
+            "INSERT INTO mail_snoozed (user_id, message, until) VALUES ($1, $2, $3) ON CONFLICT (user_id, message) DO UPDATE SET until = excluded.until",
+            &[user_id.into(), message.into(), until.into()],
+        )
+        .await?;
+    Ok(true)
+}
+
+/// When a snoozed message comes back, if it is snoozed.
+pub async fn snoozed_until(
+    store: &dyn AsyncStore,
+    user_id: &str,
+    message: &str,
+) -> StoreResult<Option<i64>> {
+    Ok(store
+        .query(
+            "SELECT until FROM mail_snoozed WHERE user_id = $1 AND message = $2",
+            &[user_id.into(), message.into()],
+        )
+        .await?
+        .first()
+        .and_then(|r| r.int(0)))
+}
+
+/// Ends a snooze now (or forgets it, when the message has moved on).
+pub async fn unsnooze(store: &dyn AsyncStore, user_id: &str, message: &str) -> StoreResult<()> {
+    store
+        .execute(
+            "DELETE FROM mail_snoozed WHERE user_id = $1 AND message = $2",
+            &[user_id.into(), message.into()],
+        )
+        .await
+        .map(|_| ())
+}
+
+/// The job that brings snoozed mail back to the inbox, unread.
+pub const WAKE_JOB: &str = "mail.wake-snoozed";
+
+/// Brings back every snooze that is due.
+pub async fn wake_due(instance: &Instance) -> Result<(), String> {
+    let store = instance.store.as_ref();
+    let due = store
+        .query(
+            "SELECT user_id, message FROM mail_snoozed WHERE until <= $1",
+            &[now().into()],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    for row in due {
+        let (user, message) = (
+            row.text(0).unwrap_or_default().to_string(),
+            row.text(1).unwrap_or_default().to_string(),
+        );
+        let inbox = by_role(store, &user, "inbox")
+            .await
+            .map_err(|e| e.to_string())?;
+        if move_message(instance, &user, &message, &inbox.id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            for entry in store
+                .query(
+                    "SELECT uid, flags FROM mail_entries WHERE mailbox_id = $1 AND message = $2",
+                    &[inbox.id.as_str().into(), message.as_str().into()],
+                )
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                let flags: Vec<&str> = entry
+                    .text(1)
+                    .unwrap_or_default()
+                    .split(' ')
+                    .filter(|f| !f.is_empty() && *f != "\\Seen")
+                    .collect();
+                set_flags(store, &inbox.id, entry.int(0).unwrap_or(0), &flags)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        unsnooze(store, &user, &message)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
