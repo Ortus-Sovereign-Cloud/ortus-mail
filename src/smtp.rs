@@ -38,6 +38,10 @@ fn max_size() -> usize {
 }
 
 /// The TLS configuration for STARTTLS, when certificate and key are set.
+pub fn tls_config() -> Option<Arc<tokio_rustls::rustls::ServerConfig>> {
+    tls()
+}
+
 fn tls() -> Option<Arc<tokio_rustls::rustls::ServerConfig>> {
     let cert = std::env::var("ORTUS_MAIL_TLS_CERT").ok()?;
     let key = std::env::var("ORTUS_MAIL_TLS_KEY").ok()?;

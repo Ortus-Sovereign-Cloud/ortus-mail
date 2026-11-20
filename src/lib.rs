@@ -5,6 +5,7 @@
 
 pub mod admin;
 pub mod domains;
+pub mod imap;
 pub mod send;
 pub mod smtp;
 pub mod spam;
@@ -71,6 +72,11 @@ impl App for Mail {
                 role: ortus_core::config::Role::Mail,
                 name: "submission",
                 run: smtp::run_submission,
+            },
+            RoleTask {
+                role: ortus_core::config::Role::Mail,
+                name: "imap",
+                run: imap::run,
             },
         ]
     }

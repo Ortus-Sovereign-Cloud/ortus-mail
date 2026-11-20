@@ -793,3 +793,131 @@ pub async fn sender_of(
         .and_then(|r| r.text(0))
         .map(str::to_string))
 }
+
+/// Makes a folder of the person's own (not one of the default roles).
+pub async fn create_mailbox(
+    store: &dyn AsyncStore,
+    user_id: &str,
+    name: &str,
+) -> StoreResult<Option<Mailbox>> {
+    let name = name.trim().trim_end_matches('/');
+    if name.is_empty()
+        || name.len() > 200
+        || name.eq_ignore_ascii_case("INBOX")
+        || name.chars().any(|c| c.is_control())
+    {
+        return Ok(None);
+    }
+    mailboxes(store, user_id).await?;
+    let id = new_id("mb_");
+    let validity = (now() / 1000) & 0x7fff_ffff;
+    let added = store
+        .execute(
+            "INSERT INTO mail_mailboxes (id, user_id, name, role, uid_validity, uid_next, modseq, created_at) VALUES ($1, $2, $3, NULL, $4, 1, 1, $5) ON CONFLICT (user_id, name) DO NOTHING",
+            &[id.as_str().into(), user_id.into(), name.into(), validity.into(), now().into()],
+        )
+        .await?;
+    if added == 0 {
+        return Ok(None);
+    }
+    Ok(mailboxes(store, user_id)
+        .await?
+        .into_iter()
+        .find(|m| m.id == id))
+}
+
+/// Renames a folder of the person's own; the default ones keep their names.
+pub async fn rename_mailbox(
+    store: &dyn AsyncStore,
+    user_id: &str,
+    from: &str,
+    to: &str,
+) -> StoreResult<bool> {
+    let to = to.trim();
+    if to.is_empty() || to.eq_ignore_ascii_case("INBOX") || to.chars().any(|c| c.is_control()) {
+        return Ok(false);
+    }
+    let taken = !store
+        .query(
+            "SELECT id FROM mail_mailboxes WHERE user_id = $1 AND name = $2",
+            &[user_id.into(), to.into()],
+        )
+        .await?
+        .is_empty();
+    if taken {
+        return Ok(false);
+    }
+    Ok(store
+        .execute(
+            "UPDATE mail_mailboxes SET name = $1 WHERE user_id = $2 AND name = $3 AND role IS NULL",
+            &[to.into(), user_id.into(), from.into()],
+        )
+        .await?
+        == 1)
+}
+
+/// Deletes a folder of the person's own, with what is in it (files by job).
+pub async fn delete_mailbox(
+    store: &dyn AsyncStore,
+    user_id: &str,
+    name: &str,
+) -> StoreResult<bool> {
+    let rows = store
+        .query(
+            "SELECT id FROM mail_mailboxes WHERE user_id = $1 AND name = $2 AND role IS NULL",
+            &[user_id.into(), name.into()],
+        )
+        .await?;
+    let Some(id) = rows.first().and_then(|r| r.text(0)).map(str::to_string) else {
+        return Ok(false);
+    };
+    let mut tx = store.begin().await?;
+    let uids: Vec<i64> = tx
+        .query(
+            "SELECT uid FROM mail_entries WHERE mailbox_id = $1",
+            &[id.as_str().into()],
+        )
+        .await?
+        .iter()
+        .filter_map(|r| r.int(0))
+        .collect();
+    let mut blobs = Vec::new();
+    for uid in uids {
+        if let Some(Some(blob)) = remove_in(&mut *tx, &id, uid).await? {
+            blobs.push(blob);
+        }
+    }
+    tx.execute(
+        "DELETE FROM mail_mailboxes WHERE id = $1",
+        &[id.as_str().into()],
+    )
+    .await?;
+    delete_files_later(&mut *tx, &blobs).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// The UIDs of a mailbox, in order.
+pub async fn uids(store: &dyn AsyncStore, mailbox_id: &str) -> StoreResult<Vec<i64>> {
+    Ok(store
+        .query(
+            "SELECT uid FROM mail_entries WHERE mailbox_id = $1 ORDER BY uid",
+            &[mailbox_id.into()],
+        )
+        .await?
+        .iter()
+        .filter_map(|r| r.int(0))
+        .collect())
+}
+
+/// One entry by UID.
+pub async fn entry_by_uid(
+    store: &dyn AsyncStore,
+    mailbox_id: &str,
+    uid: i64,
+) -> StoreResult<Option<Entry>> {
+    Ok(entries(store, mailbox_id, uid - 1, 1)
+        .await?
+        .into_iter()
+        .find(|e| e.uid == uid))
+}
