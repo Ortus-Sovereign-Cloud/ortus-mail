@@ -6,6 +6,7 @@
 pub mod admin;
 pub mod domains;
 pub mod imap;
+pub mod jmap;
 pub mod send;
 pub mod smtp;
 pub mod spam;
@@ -50,6 +51,7 @@ impl App for Mail {
     fn routes(&self) -> Vec<Route> {
         let mut all = admin::routes();
         all.extend(user::routes());
+        all.extend(jmap::routes());
         all
     }
 

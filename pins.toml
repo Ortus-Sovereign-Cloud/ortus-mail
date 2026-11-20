@@ -1,4 +1,4 @@
 # The exact commit of ortus-core this app is built and tested against.
 # ci/fetch.sh checks it out under .deps/. Change it only to a commit whose
 # own CI is green.
-ortus-core = "0a67e11f356d85f8e2d29f5d56db9d2c3f01546a"
+ortus-core = "fdcf60798980f1bb7309be5d59598304cbc409da"
