@@ -1,0 +1,20 @@
+[package]
+name = "ortus-mail"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Mail: store, receiving and sending, IMAP and JMAP, the inbox and compose."
+repository = "https://github.com/Ortus-Sovereign-Cloud/ortus-mail"
+publish = false
+
+[dependencies]
+# Built from the commit in pins.toml (checked out by ci/fetch.sh), never
+# from the branch: see the patch below.
+ortus-core = { git = "https://github.com/Ortus-Sovereign-Cloud/ortus-core" }
+
+[dev-dependencies]
+rust-web-server = "18.34"
+serde_json = "1"
+
+[patch."https://github.com/Ortus-Sovereign-Cloud/ortus-core"]
+ortus-core = { path = ".deps/ortus-core" }
