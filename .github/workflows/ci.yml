@@ -67,4 +67,8 @@ jobs:
           exit 1
       - name: The browser
         run: cd web && npm ci && npx playwright install --with-deps chromium
+      - name: An outside mail server (Postfix)
+        run: ci/outside-mail.sh "$RUNNER_TEMP/outside-maildir" | sed 's/^export //' >> "$GITHUB_ENV"
       - run: ci/check.sh
+        env:
+          ORTUS_REQUIRE_OUTSIDE: "1"
