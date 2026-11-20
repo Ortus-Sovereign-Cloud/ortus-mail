@@ -567,6 +567,13 @@ export class OrtusMailCompose extends LitElement {
     if (draft) await this.loadDraft(draft);
     else if (reply) await this.loadReply(reply);
     if (to && ADDRESS.test(to)) this.to = [{ name: null, email: to }];
+    // Another app's "send by email": a subject and text to start from.
+    if (!draft && !reply) {
+      const subject = p.get("subject");
+      const text = p.get("text");
+      if (subject) this.subject = subject.slice(0, 500);
+      if (text) this.text = text.slice(0, 10_000);
+    }
     void this.check();
   }
 

@@ -116,3 +116,9 @@ test("without the calendar app, Compose offers no times", async ({ page }) => {
   await expect(compose(page).getByRole("button", { name: en.timesThatWork })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
+
+test("another app starts a message with a subject and text", async ({ page }) => {
+  await page.goto("/mail/compose?subject=shelter-agreement.docx&text=https%3A%2F%2Fexample.org%2Fdrive%3Ffile%3Dd1");
+  await expect(compose(page).getByRole("textbox", { name: en.subject })).toHaveValue("shelter-agreement.docx");
+  await expect(compose(page).getByRole("textbox", { name: en.message })).toHaveValue("https://example.org/drive?file=d1");
+});
