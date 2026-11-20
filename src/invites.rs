@@ -163,6 +163,24 @@ impl ortus_core::interfaces::Mailer for Service {
     }
 }
 
+/// The UID of a calendar text, its lines unfolded first (long UIDs are
+/// folded over lines).
+pub fn uid_of(text: &str) -> Option<String> {
+    text.replace("\r\n ", "")
+        .replace("\r\n\t", "")
+        .replace("\n ", "")
+        .replace("\n\t", "")
+        .lines()
+        .find_map(|l| {
+            let (head, value) = l.split_once(':')?;
+            head.split(';')
+                .next()?
+                .trim()
+                .eq_ignore_ascii_case("UID")
+                .then(|| value.trim().to_string())
+        })
+}
+
 /// What the inbox shows of a message's invitation, with the person's answer.
 pub async fn shown(instance: &Instance, user: &str, raw: &[u8]) -> Option<Value> {
     let (method, text) = calendar_part(raw)?;
@@ -254,10 +272,7 @@ async fn rsvp(
     let Some((_, text)) = calendar_part(&raw) else {
         return Err(ApiError::not_found("That message has no invitation."));
     };
-    let uid = text
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("UID:").map(str::to_string))
-        .ok_or_else(|| ApiError::bad_request("The invitation has no UID."))?;
+    let uid = uid_of(&text).ok_or_else(|| ApiError::bad_request("The invitation has no UID."))?;
     let calendar = calendar(instance)
         .await
         .ok_or_else(|| ApiError::not_installed("calendar"))?;
@@ -309,5 +324,10 @@ mod tests {
         assert_eq!("REQUEST", method);
         assert!(text.contains("UID:x"));
         assert!(super::calendar_part(b"Subject: x\r\n\r\nplain").is_none());
+        let folded = "BEGIN:VEVENT\r\nUID:040000008200E00074C5B7101A82E0080000000\r\n 0B0A1B2C3D4E5F\r\nEND:VEVENT\r\n";
+        assert_eq!(
+            Some("040000008200E00074C5B7101A82E00800000000B0A1B2C3D4E5F".to_string()),
+            super::uid_of(folded)
+        );
     }
 }

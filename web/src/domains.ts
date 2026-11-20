@@ -317,7 +317,8 @@ export class OrtusMailDomains extends LitElement {
     const signing = ok("spf") && ok("dkim_rsa");
     const dmarc = of("dmarc")?.status;
     const sts = ok("mta_sts");
-    const apps = ["imap", "submission", "jmap", "autoconfig"].filter(ok).length;
+    const kinds = ["imap", "submission", "jmap", "autoconfig", "caldav", "carddav"].filter((p) => of(p));
+    const apps = kinds.filter(ok).length;
     return html`<div class="cards">
       <div class="card">
         <small>${t(this.localize, "cardReceiving")}</small>
@@ -336,7 +337,7 @@ export class OrtusMailDomains extends LitElement {
       </div>
       <div class="card">
         <small>${t(this.localize, "cardApps")}</small>
-        <strong class=${apps === 4 ? "good" : "warn"}>${t(this.localize, "appsFound", { count: apps })}</strong>
+        <strong class=${apps === kinds.length ? "good" : "warn"}>${t(this.localize, "appsFound", { count: apps, total: kinds.length })}</strong>
         <small>${t(this.localize, "appsLead")}</small>
       </div>
     </div>`;

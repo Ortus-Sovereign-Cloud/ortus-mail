@@ -34,6 +34,9 @@ pub struct Hosts {
     pub mail: String,
     /// The web client (autoconfig, MTA-STS policy, JMAP).
     pub web: String,
+    /// The port of calendar and contacts apps (CalDAV and CardDAV with
+    /// TLS, on the mail host), when the calendar app is installed.
+    pub dav: Option<u16>,
 }
 
 impl Hosts {
@@ -46,9 +49,17 @@ impl Hosts {
             .ok()
             .filter(|h| !h.trim().is_empty())
             .unwrap_or_else(|| web.clone());
+        // The calendar app's listener (ORTUS_DAVS_LISTEN, 0.0.0.0:8443).
+        let dav = instance.app("calendar").map(|_| {
+            std::env::var("ORTUS_DAVS_LISTEN")
+                .ok()
+                .and_then(|a| a.rsplit_once(':').and_then(|(_, p)| p.parse().ok()))
+                .unwrap_or(8443)
+        });
         Self {
             mail: mail.trim_end_matches('.').to_ascii_lowercase(),
             web,
+            dav,
         }
     }
 }
@@ -130,7 +141,25 @@ pub fn expected(
         value,
         required,
     };
-    vec![
+    let dav = hosts.dav.map(|port| {
+        [
+            r(
+                "caldav",
+                "SRV",
+                "_caldavs._tcp",
+                format!("0 1 {port} {}.", hosts.mail),
+                false,
+            ),
+            r(
+                "carddav",
+                "SRV",
+                "_carddavs._tcp",
+                format!("0 1 {port} {}.", hosts.mail),
+                false,
+            ),
+        ]
+    });
+    let mut all = vec![
         r("receive", "MX", "@", format!("10 {}.", hosts.mail), true),
         r("spf", "TXT", "@", "v=spf1 mx -all".into(), true),
         r(
@@ -203,7 +232,9 @@ pub fn expected(
             format!("{}.", hosts.web),
             false,
         ),
-    ]
+    ];
+    all.extend(dav.into_iter().flatten());
+    all
 }
 
 /// What a check found for one record.
@@ -595,6 +626,33 @@ mod tests {
             value: value.into(),
             required: true,
         }
+    }
+
+    #[test]
+    fn calendar_apps_find_the_calendar_when_it_is_installed() {
+        let keys = DkimKeys {
+            rsa_selector: "r".into(),
+            ed_selector: "e".into(),
+            rsa_public: "AAA".into(),
+            ed_public: "BBB".into(),
+        };
+        let mut hosts = Hosts {
+            mail: "mail.ministry.example".into(),
+            web: "ortus.ministry.example".into(),
+            dav: None,
+        };
+        let without = expected("ministry.example", &hosts, &keys, "quarantine", "1");
+        assert!(!without.iter().any(|e| e.purpose == "caldav"));
+        hosts.dav = Some(8443);
+        let with = expected("ministry.example", &hosts, &keys, "quarantine", "1");
+        let caldav = with.iter().find(|e| e.purpose == "caldav").unwrap();
+        assert_eq!(
+            ("_caldavs._tcp", "0 1 8443 mail.ministry.example."),
+            (caldav.name.as_str(), caldav.value.as_str())
+        );
+        assert!(with
+            .iter()
+            .any(|e| e.purpose == "carddav" && e.name == "_carddavs._tcp"));
     }
 
     #[test]
