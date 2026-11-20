@@ -3,12 +3,15 @@
 //! An Ortus app crate: it depends on `ortus-core` only and hands its apps
 //! to a program through [`apps`].
 
+pub mod admin;
+pub mod domains;
 pub mod store;
 
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use ortus_core::app::{App, AppInfo, Group, JobKind};
+use ortus_core::api::Route;
+use ortus_core::app::{AdminSection, App, AppInfo, Group, JobKind};
 use ortus_core::instance::Instance;
 use ortus_core::retention::Rules;
 use ortus_core::storage::{AsyncTx, BoxFuture, Migration};
@@ -39,27 +42,59 @@ impl App for Mail {
         store::MIGRATIONS
     }
 
-    fn jobs(&self, instance: &Arc<Instance>) -> Vec<JobKind> {
-        let instance = Arc::clone(instance);
-        vec![JobKind {
-            kind: store::DELETE_FILES_JOB.into(),
-            handler: Box::new(move |job, _tx| {
-                let instance = Arc::clone(&instance);
-                let payload = job.payload.clone();
-                Box::pin(async move {
-                    let blobs: Vec<String> =
-                        serde_json::from_str(&payload).map_err(|e| e.to_string())?;
-                    for blob in blobs {
-                        instance
-                            .files
-                            .delete(&blob)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                    }
-                    Ok(())
-                })
-            }),
+    fn routes(&self) -> Vec<Route> {
+        admin::routes()
+    }
+
+    fn admin_sections(&self) -> Vec<AdminSection> {
+        vec![AdminSection {
+            path: "/admin/domains",
+            element: "ortus-mail-domains",
+            label: "domains",
         }]
+    }
+
+    fn periodic(&self) -> Vec<(&'static str, i64)> {
+        vec![(domains::CHECK_JOB, 10 * 60 * 1000)]
+    }
+
+    fn jobs(&self, instance: &Arc<Instance>) -> Vec<JobKind> {
+        let checks = Arc::clone(instance);
+        let instance = Arc::clone(instance);
+        vec![
+            JobKind {
+                kind: domains::CHECK_JOB.into(),
+                handler: Box::new(move |_, _tx| {
+                    // DNS lookups take seconds: they run outside the job's
+                    // transaction (which holds SQLite's write lock), on
+                    // their own; the next period tries again if one fails.
+                    let instance = Arc::clone(&checks);
+                    ortus_core::runtime::io().spawn(async move {
+                        let _ = admin::check_all(&instance).await;
+                    });
+                    Box::pin(async { Ok(()) })
+                }),
+            },
+            JobKind {
+                kind: store::DELETE_FILES_JOB.into(),
+                handler: Box::new(move |job, _tx| {
+                    let instance = Arc::clone(&instance);
+                    let payload = job.payload.clone();
+                    Box::pin(async move {
+                        let blobs: Vec<String> =
+                            serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+                        for blob in blobs {
+                            instance
+                                .files
+                                .delete(&blob)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        }
+                        Ok(())
+                    })
+                }),
+            },
+        ]
     }
 
     fn purge<'a>(

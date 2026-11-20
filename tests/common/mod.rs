@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+pub mod dns;
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
