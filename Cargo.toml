@@ -17,6 +17,7 @@ mail-parser = "1"
 # from the branch: see the patch below.
 ortus-core = { git = "https://github.com/Ortus-Sovereign-Cloud/ortus-core" }
 # The built web client (web/dist), embedded; `npm run build` in web/ first.
+lettre = { version = "0.11.24", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls", "rustls", "aws-lc-rs", "webpki-roots", "builder", "hostname"] }
 rust-embed = "8.14.0"
 rust-web-server = "18.34"
 serde = { version = "1.0.229", features = ["derive"] }

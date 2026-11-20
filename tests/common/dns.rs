@@ -7,7 +7,7 @@ use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::sync::{Arc, Mutex};
 
 use hickory_proto::op::{Message, OpCode, ResponseCode};
-use hickory_proto::rr::rdata::{CNAME, MX, SRV, TXT};
+use hickory_proto::rr::rdata::{A, CNAME, MX, SRV, TXT};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 
 type Zone = Arc<Mutex<HashMap<(String, RecordType), Vec<RData>>>>;
@@ -135,6 +135,10 @@ impl Dns {
                 Name::from_ascii(host).unwrap(),
             ))],
         );
+    }
+
+    pub fn a(&self, name: &str, ip: std::net::Ipv4Addr) {
+        self.set(name, RecordType::A, vec![RData::A(A(ip))]);
     }
 
     pub fn clear(&self, name: &str, kind: RecordType) {

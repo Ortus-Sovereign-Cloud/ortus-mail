@@ -13,10 +13,11 @@ use ortus_core::storage::{AsyncStore, AsyncTx, Migration, StoreError, StoreResul
 use serde::Serialize;
 use serde_json::json;
 
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "store",
-    sql: "CREATE TABLE mail_domains (
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "store",
+        sql: "CREATE TABLE mail_domains (
         domain TEXT PRIMARY KEY,
         added_at BIGINT NOT NULL,
         state TEXT NOT NULL,
@@ -73,7 +74,26 @@ pub const MIGRATIONS: &[Migration] = &[Migration {
         PRIMARY KEY (mailbox_id, uid)
     );
     CREATE INDEX mail_entries_message ON mail_entries (message)",
-}];
+    },
+    Migration {
+        version: 2,
+        name: "outbound",
+        sql: "CREATE TABLE mail_outbound (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        message TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        state TEXT NOT NULL,
+        attempts BIGINT NOT NULL,
+        last_error TEXT,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+    );
+    CREATE INDEX mail_outbound_state ON mail_outbound (state, created_at);
+    CREATE INDEX mail_outbound_message ON mail_outbound (message)",
+    },
+];
 
 /// The mailboxes everyone has, by role, with their IMAP names.
 pub const DEFAULT_MAILBOXES: [(&str, &str); 6] = [

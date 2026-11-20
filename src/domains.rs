@@ -79,6 +79,7 @@ pub struct DkimKeys {
 /// New DKIM keys: RSA-2048 (what every receiver checks) and Ed25519.
 /// Answers the public half and the private keys (PKCS#8) to seal.
 pub fn new_dkim_keys(month: &str) -> Result<(DkimKeys, Vec<u8>, Vec<u8>), String> {
+    let tag = ortus_core::auth::random_hex(2);
     let rsa = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048)
         .map_err(|_| "could not make an RSA key")?;
     let rsa_private: Pkcs8V1Der = rsa.as_der().map_err(|_| "could not encode the RSA key")?;
@@ -90,8 +91,10 @@ pub fn new_dkim_keys(month: &str) -> Result<(DkimKeys, Vec<u8>, Vec<u8>), String
         mail_auth::crypto::Ed25519Key::from_pkcs8_der(&ed_private).map_err(|e| e.to_string())?;
     Ok((
         DkimKeys {
-            rsa_selector: format!("ortus{month}r"),
-            ed_selector: format!("ortus{month}e"),
+            // A random part too: a domain added again (or keys renewed)
+            // never reuses a selector receivers may have cached.
+            rsa_selector: format!("ortus{month}{tag}r"),
+            ed_selector: format!("ortus{month}{tag}e"),
             rsa_public: STANDARD.encode(rsa_public.as_ref()),
             ed_public: STANDARD.encode(ed.public_key()),
         },

@@ -2453,6 +2453,7 @@ dependencies = [
  "base64 0.22.1",
  "hickory-proto",
  "hickory-resolver",
+ "lettre",
  "mail-auth",
  "mail-parser",
  "ortus-core",

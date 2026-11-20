@@ -5,6 +5,7 @@
 
 pub mod admin;
 pub mod domains;
+pub mod send;
 pub mod smtp;
 pub mod store;
 
@@ -12,7 +13,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use ortus_core::api::Route;
-use ortus_core::app::{AdminSection, App, AppInfo, Group, JobKind, RoleTask};
+use ortus_core::app::{AdminSection, App, AppInfo, Group, JobKind, OutsideJobKind, RoleTask};
 use ortus_core::instance::Instance;
 use ortus_core::retention::Rules;
 use ortus_core::storage::{AsyncTx, BoxFuture, Migration};
@@ -104,6 +105,17 @@ impl App for Mail {
                 }),
             },
         ]
+    }
+
+    fn outside_jobs(&self, instance: &Arc<Instance>) -> Vec<OutsideJobKind> {
+        let instance = Arc::clone(instance);
+        vec![OutsideJobKind {
+            kind: send::DELIVER_JOB.into(),
+            handler: Box::new(move |job| {
+                let instance = Arc::clone(&instance);
+                Box::pin(async move { send::deliver(instance, job).await })
+            }),
+        }]
     }
 
     fn purge<'a>(
