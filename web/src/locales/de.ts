@@ -265,6 +265,9 @@ const messages: Record<MailKey, MailMessage> = {
   "repliedDeclined": "{name} hat „{what}“ abgesagt.",
   "allDay": "Ganztägig",
   "inMinutes": {"one": "in {count} Min.", "other": "in {count} Min."},
+  "saveToDrive": "In Drive speichern",
+  "saveToDriveNamed": "{name} in Drive speichern",
+  "savedToDrive": "{name} ist in Ihrem Drive unter „Aus E-Mails“.",
 };
 
 export default messages;

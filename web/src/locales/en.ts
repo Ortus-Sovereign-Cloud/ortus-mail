@@ -266,6 +266,9 @@ const en = {
   "repliedDeclined": "{name} declined “{what}”.",
   "allDay": "All day",
   "inMinutes": {"one": "in {count} min", "other": "in {count} min"},
+  "saveToDrive": "Save to Drive",
+  "saveToDriveNamed": "Save {name} to Drive",
+  "savedToDrive": "{name} is in your drive, under From email.",
 };
 
 export type MailKey = keyof typeof en;

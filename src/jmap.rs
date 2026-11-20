@@ -84,9 +84,9 @@ impl From<ortus_core::storage::StoreError> for MethodError {
 
 type Answer = Result<Value, MethodError>;
 
-struct Ctx<'a> {
-    instance: &'a Arc<Instance>,
-    user: &'a User,
+pub(crate) struct Ctx<'a> {
+    pub(crate) instance: &'a Arc<Instance>,
+    pub(crate) user: &'a User,
 }
 
 impl Ctx<'_> {
@@ -1992,7 +1992,7 @@ fn upload_path(user_id: &str, blob: &str) -> Option<String> {
 
 /// A blob of the person's: an upload, a whole message (its Email id) or
 /// one part of one (`<email id>.<part>`), decoded.
-async fn blob_bytes(ctx: &Ctx<'_>, blob: &str) -> Option<Vec<u8>> {
+pub(crate) async fn blob_bytes(ctx: &Ctx<'_>, blob: &str) -> Option<Vec<u8>> {
     if let Some(path) = upload_path(&ctx.user.id, blob) {
         return ctx.instance.files.get(&path).await.ok().flatten();
     }

@@ -265,6 +265,9 @@ const messages: Record<MailKey, MailMessage> = {
   "repliedDeclined": "{name} odrzuca „{what}”.",
   "allDay": "Cały dzień",
   "inMinutes": {"one": "za {count} min", "few": "za {count} min", "many": "za {count} min", "other": "za {count} min"},
+  "saveToDrive": "Zapisz na Dysku",
+  "saveToDriveNamed": "Zapisz {name} na Dysku",
+  "savedToDrive": "{name} jest na Twoim Dysku, w sekcji Z poczty.",
 };
 
 export default messages;

@@ -265,6 +265,9 @@ const messages: Record<MailKey, MailMessage> = {
   "repliedDeclined": "{name} відхиляє «{what}».",
   "allDay": "Увесь день",
   "inMinutes": {"one": "за {count} хв", "few": "за {count} хв", "many": "за {count} хв", "other": "за {count} хв"},
+  "saveToDrive": "Зберегти на Диск",
+  "saveToDriveNamed": "Зберегти {name} на Диск",
+  "savedToDrive": "{name} збережено на Диску, у розділі «З пошти».",
 };
 
 export default messages;

@@ -5,7 +5,7 @@ import { ApiError, LitElement, LocalizeController, call, controls, css, customEl
 import { t } from "./i18n.js";
 import { LIST_PROPERTIES, MethodError, READ_PROPERTIES, jmap, labelsOf, type Email, type EmailAddress, type Invite, type Mailbox } from "./jmap.js";
 import type { MailKey } from "./locales/en.js";
-import { calendarInstalled, navigate } from "./events.js";
+import { calendarInstalled, driveInstalled, navigate, toast } from "./events.js";
 
 const ICON_ARCHIVE = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4"/></svg>`;
 const ICON_TRASH = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>`;
@@ -649,6 +649,22 @@ export class OrtusMailInbox extends LitElement {
         font-size: 15px;
         font-weight: 600;
       }
+      .filebox {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .filebox .save {
+        block-size: 32px;
+        padding-inline: 10px;
+        border-radius: 8px;
+        border: 1px solid var(--ortus-line-strong);
+        background: transparent;
+        color: var(--ortus-text-2);
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+      }
       .chip.invite {
         background: color-mix(in srgb, var(--ortus-teal) 18%, transparent);
         color: var(--ortus-teal);
@@ -792,6 +808,7 @@ export class OrtusMailInbox extends LitElement {
   /** For each invitation shown, what else is on at that time. */
   @state() private overlaps = new Map<string, string[]>();
   @state() private answering = "";
+  @state() private hasDrive = false;
   private agendaTimer: number | undefined;
   private person: Me | undefined;
   private events: EventSource | undefined;
@@ -803,6 +820,7 @@ export class OrtusMailInbox extends LitElement {
     window.addEventListener("popstate", this.onPop);
     void this.start();
     void this.loadAgenda();
+    void driveInstalled().then((on) => (this.hasDrive = on));
     this.agendaTimer = window.setInterval(() => {
       this.now = Date.now();
       void this.loadAgenda();
@@ -947,6 +965,15 @@ export class OrtusMailInbox extends LitElement {
       }
     }
     this.overlaps = found;
+  }
+
+  private async saveToDrive(blobId: string, name: string, type: string): Promise<void> {
+    try {
+      await call("POST", "/mail/web/save-to-drive", { blobId, name, type });
+      toast({ text: t(this.localize, "savedToDrive", { name }) });
+    } catch (e) {
+      toast({ text: e instanceof ApiError ? e.message : t(this.localize, "sendFailed") });
+    }
   }
 
   private async answerInvite(m: Email, answer: string): Promise<void> {
@@ -1231,10 +1258,15 @@ export class OrtusMailInbox extends LitElement {
         ? html`<div class="files">
             ${files.map((a) => {
               const ext = (a.name ?? "").split(".").pop()?.toUpperCase().slice(0, 4) || "FILE";
-              return html`<a class="file" href="/api/v1/mail/web/download/${encodeURIComponent(a.blobId)}/${encodeURIComponent(a.name ?? "file")}" download=${a.name ?? "file"}>
-                <span class="badge ${ext === "PDF" ? "" : "doc"}" aria-hidden="true">${ext}</span>
-                <span>${a.name ?? t(this.localize, "attachment")}<small>${this.size(a.size)}</small></span>
-              </a>`;
+              return html`<span class="filebox"
+                ><a class="file" href="/api/v1/mail/web/download/${encodeURIComponent(a.blobId)}/${encodeURIComponent(a.name ?? "file")}" download=${a.name ?? "file"}>
+                  <span class="badge ${ext === "PDF" ? "" : "doc"}" aria-hidden="true">${ext}</span>
+                  <span>${a.name ?? t(this.localize, "attachment")}<small>${this.size(a.size)}</small></span>
+                </a>
+                ${this.hasDrive
+                  ? html`<button class="save" @click=${() => this.saveToDrive(a.blobId, a.name ?? "attachment", a.type)} aria-label=${t(this.localize, "saveToDriveNamed", { name: a.name ?? "" })}>${t(this.localize, "saveToDrive")}</button>`
+                  : nothing}</span
+              >`;
             })}
           </div>`
         : nothing}

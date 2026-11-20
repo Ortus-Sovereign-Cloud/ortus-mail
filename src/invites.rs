@@ -302,8 +302,94 @@ fn h_rsvp(
     Box::pin(async move { answer(&request, rsvp(&request, &params, &instance).await) })
 }
 
+#[derive(Deserialize)]
+struct SaveInput {
+    #[serde(rename = "blobId")]
+    blob_id: String,
+    name: String,
+    #[serde(default, rename = "type")]
+    mime: String,
+}
+
+/// Saves an attachment of one's mail into one's drive ("From email").
+async fn save_to_drive(request: &Request, instance: &Arc<Instance>) -> Result<Response, ApiError> {
+    let me = ortus_core::auth::current(request, instance)
+        .await
+        .ok_or_else(ApiError::sign_in)?;
+    let input: SaveInput = body(request)?;
+    let drive = instance
+        .services
+        .get::<dyn ortus_core::interfaces::Drive>(&instance.switches)
+        .await
+        .map_err(|_| ApiError::not_installed("drive"))?;
+    let ctx = crate::jmap::Ctx {
+        instance,
+        user: &me.user,
+    };
+    let bytes = crate::jmap::blob_bytes(&ctx, &input.blob_id)
+        .await
+        .ok_or_else(|| ApiError::not_found("There is no such attachment."))?;
+    // Who sent it, from the message the attachment is in.
+    let message = input.blob_id.split('.').next().unwrap_or_default();
+    let sender = instance
+        .store
+        .query(
+            "SELECT from_name, from_addr FROM mail_messages WHERE id = $1 AND user_id = $2",
+            &[message.into(), me.user.id.as_str().into()],
+        )
+        .await?
+        .first()
+        .and_then(|r| {
+            r.text(0)
+                .filter(|n| !n.is_empty())
+                .or(r.text(1))
+                .map(str::to_string)
+        });
+    let note = sender.map(|s| format!("Attached by {s}"));
+    let mime = if input.mime.is_empty() {
+        "application/octet-stream"
+    } else {
+        input.mime.as_str()
+    };
+    let saved = drive
+        .save(
+            &me.user.id,
+            &input.name,
+            mime,
+            &bytes,
+            "mail",
+            note.as_deref(),
+        )
+        .await
+        .map_err(|e| ApiError {
+            status: 409,
+            code: "drive",
+            message: e,
+        })?;
+    Ok(ok(&json!({"id": saved.id, "path": saved.path})))
+}
+
+fn h_save(
+    request: Request,
+    _: PathParams,
+    _: ConnectionInfo,
+    instance: Arc<Instance>,
+) -> BoxFuture<'static, Response> {
+    Box::pin(async move { answer(&request, save_to_drive(&request, &instance).await) })
+}
+
 pub fn routes() -> Vec<Route> {
     vec![Route {
+        method: Method::Post,
+        path: "/mail/web/save-to-drive",
+        id: "saveAttachmentToDrive",
+        tag: "mail",
+        summary: "Save an attachment of one's mail into one's drive: {blobId, name, type}.",
+        access: Access::Signed,
+        response: || json!({"type": "object"}),
+        handler: h_save,
+    },
+    Route {
         method: Method::Post,
         path: "/mail/messages/:message/rsvp",
         id: "answerInvitation",

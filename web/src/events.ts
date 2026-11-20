@@ -18,12 +18,22 @@ export function toast(detail: Toast): void {
   window.dispatchEvent(new CustomEvent<Toast>("ortus-mail-toast", { detail }));
 }
 
-let calendarCheck: Promise<boolean> | undefined;
+let appsCheck: Promise<string[]> | undefined;
 
-/** Whether the calendar app is installed and on (asked once). */
+/** The apps installed and on (asked once). */
+function installedApps(): Promise<string[]> {
+  appsCheck ??= call<{ apps: { id: string }[] }>("GET", "/apps")
+    .then((r) => r.apps.map((a) => a.id))
+    .catch(() => []);
+  return appsCheck;
+}
+
+/** Whether the calendar app is installed and on. */
 export function calendarInstalled(): Promise<boolean> {
-  calendarCheck ??= call<{ apps: { id: string }[] }>("GET", "/apps")
-    .then((r) => r.apps.some((a) => a.id === "calendar"))
-    .catch(() => false);
-  return calendarCheck;
+  return installedApps().then((ids) => ids.includes("calendar"));
+}
+
+/** Whether the drive app is installed and on. */
+export function driveInstalled(): Promise<boolean> {
+  return installedApps().then((ids) => ids.includes("drive"));
 }

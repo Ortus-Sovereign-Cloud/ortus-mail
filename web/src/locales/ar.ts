@@ -265,6 +265,9 @@ const messages: Record<MailKey, MailMessage> = {
   "repliedDeclined": "رفض {name} «{what}».",
   "allDay": "طوال اليوم",
   "inMinutes": {"zero": "بعد {count} دقيقة", "one": "بعد دقيقة", "two": "بعد دقيقتين", "few": "بعد {count} دقائق", "many": "بعد {count} دقيقة", "other": "بعد {count} دقيقة"},
+  "saveToDrive": "الحفظ في Drive",
+  "saveToDriveNamed": "حفظ {name} في Drive",
+  "savedToDrive": "أصبح {name} في Drive لديك، ضمن «من البريد».",
 };
 
 export default messages;
