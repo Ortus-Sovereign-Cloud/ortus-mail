@@ -392,6 +392,33 @@ impl Session {
             if self.secure { "ESMTPS" } else { "ESMTP" },
             mail_parser::DateTime::from_timestamp(ortus_core::program::now_ms() / 1000).to_rfc822()
         );
+        let spf_word = format!("{:?}", spf.result()).to_lowercase();
+        let dkim_words: Vec<String> = dkim
+            .iter()
+            .map(|d| {
+                format!("{:?}", d.result())
+                    .to_lowercase()
+                    .split('(')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        let dmarc_word = if !failed {
+            "pass"
+        } else if matches!(dmarc.dkim_result(), DmarcResult::None) {
+            "none"
+        } else {
+            "fail"
+        };
+        let verdict = crate::spam::score(
+            &message,
+            &crate::spam::Auth {
+                spf: &spf_word,
+                dkim: &dkim_words,
+                dmarc: dmarc_word,
+            },
+        );
         let mut stored = format!("{received}{}", results.to_header()).into_bytes();
         stored.extend_from_slice(&message);
         let verdicts = json!({
@@ -404,19 +431,30 @@ impl Session {
         });
         let store = self.instance.store.as_ref();
         let mut delivered = 0;
+        let sender = (!header_from.is_empty()).then(|| header_from.clone());
         for (_, user) in &self.to {
-            let role = if junk { "junk" } else { "inbox" };
+            // Each person's own corrections count too.
+            let mine = match crate::spam::personal(store, user, sender.as_deref(), &verdict).await {
+                Ok(mine) => mine,
+                Err(_) => crate::spam::Verdict {
+                    score: verdict.score,
+                    reasons: verdict.reasons.clone(),
+                },
+            };
+            let role = if junk || mine.junk() { "junk" } else { "inbox" };
             let Ok(mailbox) = store::by_role(store, user, role).await else {
                 continue;
             };
+            let mut copy = mine.header().into_bytes();
+            copy.extend_from_slice(&stored);
             match store::deliver(
                 &self.instance,
                 user,
                 &mailbox.id,
-                &stored,
+                &copy,
                 &[],
                 Some(&verdicts),
-                i64::from(junk) * 100,
+                (mine.score * 10.0) as i64,
             )
             .await
             {

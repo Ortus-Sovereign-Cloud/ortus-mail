@@ -45,9 +45,14 @@ fn answer(zone: &Zone, query: &[u8]) -> Option<Vec<u8>> {
 
 impl Dns {
     pub fn start() -> Self {
-        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = udp.local_addr().unwrap();
-        let tcp = TcpListener::bind(addr).unwrap();
+        // A free UDP port whose TCP twin is free too.
+        let (udp, tcp, addr) = loop {
+            let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = udp.local_addr().unwrap();
+            if let Ok(tcp) = TcpListener::bind(addr) {
+                break (udp, tcp, addr);
+            }
+        };
         let zone: Zone = Arc::default();
         let z = Arc::clone(&zone);
         std::thread::spawn(move || {

@@ -93,6 +93,17 @@ pub const MIGRATIONS: &[Migration] = &[
     CREATE INDEX mail_outbound_state ON mail_outbound (state, created_at);
     CREATE INDEX mail_outbound_message ON mail_outbound (message)",
     },
+    Migration {
+        version: 3,
+        name: "what people taught the spam filter",
+        sql: "CREATE TABLE mail_senders (
+        user_id TEXT NOT NULL,
+        address TEXT NOT NULL,
+        junk BIGINT NOT NULL,
+        ham BIGINT NOT NULL,
+        PRIMARY KEY (user_id, address)
+    )",
+    },
 ];
 
 /// The mailboxes everyone has, by role, with their IMAP names.
@@ -637,6 +648,8 @@ pub async fn forget(tx: &mut dyn AsyncTx, user_id: &str) -> StoreResult<Vec<Stri
         "DELETE FROM mail_messages WHERE user_id = $1",
         "DELETE FROM mail_mailboxes WHERE user_id = $1",
         "DELETE FROM mail_addresses WHERE user_id = $1",
+        "DELETE FROM mail_senders WHERE user_id = $1",
+        "DELETE FROM mail_outbound WHERE user_id = $1",
     ] {
         tx.execute(sql, &[user_id.into()]).await?;
     }
@@ -731,4 +744,52 @@ pub async fn is_our_domain(store: &dyn AsyncStore, domain: &str) -> StoreResult<
         )
         .await?
         .is_empty())
+}
+
+/// Moves a person's message to the mailbox with `role` (from wherever it
+/// is). Answers the new UID, or `None` when it is not theirs.
+pub async fn move_to_role(
+    store: &dyn AsyncStore,
+    user_id: &str,
+    message: &str,
+    role: &str,
+) -> StoreResult<Option<i64>> {
+    let target = by_role(store, user_id, role).await?;
+    let rows = store
+        .query("SELECT e.mailbox_id, e.uid FROM mail_entries e JOIN mail_mailboxes b ON b.id = e.mailbox_id WHERE e.message = $1 AND b.user_id = $2", &[message.into(), user_id.into()])
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let (from, uid) = (
+        row.text(0).unwrap_or_default().to_string(),
+        row.int(1).unwrap_or_default(),
+    );
+    if from == target.id {
+        return Ok(Some(uid));
+    }
+    let Some(new_uid) = copy(store, &from, uid, &target.id).await? else {
+        return Ok(None);
+    };
+    let mut tx = store.begin().await?;
+    remove_in(&mut *tx, &from, uid).await?;
+    tx.commit().await?;
+    Ok(Some(new_uid))
+}
+
+/// The sender address of a person's message.
+pub async fn sender_of(
+    store: &dyn AsyncStore,
+    user_id: &str,
+    message: &str,
+) -> StoreResult<Option<String>> {
+    Ok(store
+        .query(
+            "SELECT from_addr FROM mail_messages WHERE id = $1 AND user_id = $2",
+            &[message.into(), user_id.into()],
+        )
+        .await?
+        .first()
+        .and_then(|r| r.text(0))
+        .map(str::to_string))
 }

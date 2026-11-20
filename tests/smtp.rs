@@ -181,7 +181,7 @@ fn mail_is_received_checked_and_delivered() {
         assert!(reply.starts_with("250"), "{name}: {reply}");
         let raw = last_raw(&instance, &olena, "inbox").unwrap();
         assert!(
-            raw.starts_with("Received: from mail.example (127.0.0.1) by mail.ministry.example"),
+            raw.starts_with("X-Ortus-Spam: score=0.0; reasons=none\r\nReceived: from mail.example (127.0.0.1) by mail.ministry.example"),
             "{raw}"
         );
         assert!(
@@ -305,4 +305,85 @@ fn starttls_is_offered_and_used() {
     assert!(last_raw(&instance, &olena, "inbox")
         .unwrap()
         .contains("with ESMTPS"));
+}
+
+#[test]
+fn the_spam_filter_files_junk_and_learns_from_corrections() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dns = Dns::start();
+    unsafe {
+        std::env::set_var("ORTUS_DNS_SERVERS", dns.addr.to_string());
+        std::env::set_var("ORTUS_MAIL_HOSTNAME", "mail.ministry.example");
+    }
+    dns.txt("deals.example", &["v=spf1 ip4:192.0.2.9 ~all"]);
+    let (_, instance, _keep) = common::installations().remove(0);
+    let token = signed_in(&instance, "olena@ministry.example", Role::Member);
+    let olena = block_on(ortus_core::auth::accounts::by_email(
+        instance.store.as_ref(),
+        "olena@ministry.example",
+    ))
+    .unwrap()
+    .unwrap()
+    .id;
+    block_on(ortus_mail::domains::add(&instance, "ministry.example")).unwrap();
+    let listener = block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await }).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (_stop_tx, mut stop) = tokio::sync::watch::channel(false);
+    let server = Arc::clone(&instance);
+    ortus_core::runtime::io().spawn(async move {
+        ortus_mail::smtp::serve(server, listener, &mut stop)
+            .await
+            .unwrap()
+    });
+
+    let shouty = |n: u32| {
+        format!("From: \"support@bank.example\" <offers@deals.example>\r\nTo: olena@ministry.example\r\nSubject: CLAIM YOUR REWARD TODAY {n}\r\nDate: Thu, 19 Nov 2026 08:05:00 +0000\r\nMessage-ID: <{n}@deals.example>\r\n\r\nOnly today.\r\n")
+    };
+    let mut c = Client::connect(port);
+    assert!(c.send("EHLO deals.example").starts_with("250"));
+    for n in 1..=2 {
+        assert!(c
+            .send("MAIL FROM:<offers@deals.example>")
+            .starts_with("250"));
+        assert!(c
+            .send("RCPT TO:<olena@ministry.example>")
+            .starts_with("250"));
+        assert!(c.data(&shouty(n)).starts_with("250"));
+        if n == 1 {
+            // Filed as junk, with its reasons.
+            let junk = last_raw(&instance, &olena, "junk").expect("in Junk");
+            assert!(
+                junk.starts_with("X-Ortus-Spam: score=") && junk.contains("display_name_spoof"),
+                "{junk}"
+            );
+            // Olena says it is not junk: it moves, and the sender is trusted.
+            let mailbox =
+                block_on(store::by_role(instance.store.as_ref(), &olena, "junk")).unwrap();
+            let message = block_on(store::entries(instance.store.as_ref(), &mailbox.id, 0, 10))
+                .unwrap()[0]
+                .message
+                .clone();
+            let client = rust_web_server::test_client::TestClient::new(ortus_core::app(
+                Arc::clone(&instance),
+            ));
+            let moved = client
+                .post(&format!("/api/v1/mail/messages/{message}/junk"))
+                .header("Authorization", &format!("Bearer {token}"))
+                .header("X-Requested-With", "ortus")
+                .body_text(r#"{"junk": false}"#)
+                .send();
+            assert_eq!(200, moved.status(), "{}", moved.body_text());
+            assert!(last_raw(&instance, &olena, "inbox")
+                .unwrap()
+                .contains("REWARD TODAY 1"));
+            assert!(last_raw(&instance, &olena, "junk").is_none());
+        }
+    }
+    // The next one from that sender goes to the inbox.
+    assert!(
+        last_raw(&instance, &olena, "inbox")
+            .unwrap()
+            .contains("REWARD TODAY 2"),
+        "trusted now"
+    );
 }

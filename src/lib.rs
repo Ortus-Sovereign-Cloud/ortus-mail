@@ -7,7 +7,9 @@ pub mod admin;
 pub mod domains;
 pub mod send;
 pub mod smtp;
+pub mod spam;
 pub mod store;
+pub mod user;
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -45,7 +47,9 @@ impl App for Mail {
     }
 
     fn routes(&self) -> Vec<Route> {
-        admin::routes()
+        let mut all = admin::routes();
+        all.extend(user::routes());
+        all
     }
 
     fn admin_sections(&self) -> Vec<AdminSection> {
