@@ -134,6 +134,33 @@ pub const MIGRATIONS: &[Migration] = &[
     );
     CREATE INDEX mail_snoozed_until ON mail_snoozed (until)",
     },
+    Migration {
+        version: 6,
+        name: "deliverability: receiving servers and DMARC reports",
+        sql: "ALTER TABLE mail_outbound ADD COLUMN mx TEXT;
+    CREATE TABLE mail_dmarc_reports (
+        id TEXT PRIMARY KEY,
+        domain TEXT NOT NULL,
+        org TEXT NOT NULL,
+        report_id TEXT NOT NULL,
+        begin_at BIGINT NOT NULL,
+        end_at BIGINT NOT NULL,
+        received_at BIGINT NOT NULL,
+        UNIQUE (org, report_id)
+    );
+    CREATE INDEX mail_dmarc_reports_domain ON mail_dmarc_reports (domain, end_at);
+    CREATE TABLE mail_dmarc_rows (
+        report TEXT NOT NULL REFERENCES mail_dmarc_reports (id),
+        source_ip TEXT NOT NULL,
+        source_name TEXT,
+        count BIGINT NOT NULL,
+        disposition TEXT NOT NULL,
+        dkim TEXT NOT NULL,
+        spf TEXT NOT NULL,
+        header_from TEXT NOT NULL
+    );
+    CREATE INDEX mail_dmarc_rows_report ON mail_dmarc_rows (report)",
+    },
 ];
 
 /// The mailboxes everyone has, by role, with their IMAP names.

@@ -30,15 +30,15 @@ test("the tabs part mail from people, machines and lists", async ({ page }) => {
 
 test("a thread opens with its messages, attachment and label, and is read", async ({ page }) => {
   await page.goto("/mail");
-  const unread = inbox(page).getByRole("navigation").getByRole("button", { name: en.inbox });
-  await expect(unread).toContainText("4");
-  await inbox(page).getByRole("button", { name: /Anna Kowalska/ }).click();
+  const anna = inbox(page).getByRole("button", { name: /Anna Kowalska/ });
+  await expect(anna).toHaveClass(/unread/);
+  await anna.click();
   const reader = inbox(page).getByRole("region", { name: "Re: Gauge report and updated shelter agreement" });
   await expect(reader.getByRole("heading", { level: 2 })).toBeVisible();
   await expect(reader).toContainText("2 messages · 3 people");
   await expect(reader).toContainText("Legal should look at clause 4.");
   await expect(reader.locator(".chip")).toHaveText("Flood");
-  await expect(unread).toContainText("3");
+  await expect(anna).not.toHaveClass(/unread/);
   const download = page.waitForEvent("download");
   await reader.getByRole("link", { name: /gauge-report\.pdf/ }).click();
   expect((await download).suggestedFilename()).toBe("gauge-report.pdf");

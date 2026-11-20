@@ -2,6 +2,7 @@
 // the inbox or Compose by address, and the toast both can raise.
 import { LitElement, LocalizeController, css, customElement, html, nothing, state } from "ortus-kit";
 import "./compose.js";
+import "./deliverability.js";
 import "./domains.js";
 import "./inbox.js";
 import { navigate, type Toast } from "./events.js";

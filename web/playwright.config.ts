@@ -25,7 +25,11 @@ export default defineConfig({
     {
       command: `rm -rf test-results/data && ${binary}`,
       env: {
-        ORTUS_ROLES: "web,worker",
+        ORTUS_ROLES: "web,worker,mail",
+        // The mail role on ports a test may open (SMTP is how reports arrive).
+        ORTUS_SMTP_LISTEN: `127.0.0.1:${port + 1}`,
+        ORTUS_SUBMISSION_LISTEN: `127.0.0.1:${port + 2}`,
+        ORTUS_IMAP_LISTEN: `127.0.0.1:${port + 3}`,
         ORTUS_WEB_PORT: String(port),
         ORTUS_DATA_DIR: "test-results/data",
         ORTUS_SETUP_TOKEN: "e2e-setup-token",

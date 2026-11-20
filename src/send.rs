@@ -467,12 +467,23 @@ async fn summary_subject(instance: &Instance, user: &str, message: &str) -> Stri
 }
 
 async fn record(instance: &Instance, delivery: &Delivery, state: &str, error: Option<&str>) {
+    record_at(instance, delivery, state, error, None).await
+}
+
+/// Records an attempt, with the receiving server when one answered.
+async fn record_at(
+    instance: &Instance,
+    delivery: &Delivery,
+    state: &str,
+    error: Option<&str>,
+    mx: Option<&str>,
+) {
     for recipient in &delivery.to {
         let _ = instance
             .store
             .execute(
-                "UPDATE mail_outbound SET state = $1, attempts = attempts + 1, last_error = $2, updated_at = $3 WHERE message = $4 AND recipient = $5",
-                &[state.into(), error.map(str::to_string).into(), now().into(), delivery.message.as_str().into(), recipient.as_str().into()],
+                "UPDATE mail_outbound SET state = $1, attempts = attempts + 1, last_error = $2, updated_at = $3, mx = COALESCE($6, mx) WHERE message = $4 AND recipient = $5",
+                &[state.into(), error.map(str::to_string).into(), now().into(), delivery.message.as_str().into(), recipient.as_str().into(), mx.map(str::to_string).into()],
             )
             .await;
     }
@@ -513,11 +524,11 @@ pub async fn deliver(instance: Arc<Instance>, job: &Job) -> Result<(), String> {
         ortus_core::outbound::note(instance.store.as_ref(), "mail", &host).await;
         match try_deliver(&host, ip, &hello, &envelope, &raw).await {
             Outcome::Delivered => {
-                record(&instance, &delivery, "sent", None).await;
+                record_at(&instance, &delivery, "sent", None, Some(&host)).await;
                 return Ok(());
             }
             Outcome::Permanent(e) => {
-                record(&instance, &delivery, "bounced", Some(&e)).await;
+                record_at(&instance, &delivery, "bounced", Some(&e), Some(&host)).await;
                 bounce(&instance, &delivery, &e).await;
                 return Ok(());
             }

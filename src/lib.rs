@@ -9,6 +9,7 @@ pub mod domains;
 pub mod imap;
 pub mod jmap;
 pub mod later;
+pub mod reports;
 pub mod send;
 pub mod smtp;
 pub mod spam;
@@ -55,15 +56,23 @@ impl App for Mail {
         all.extend(user::routes());
         all.extend(jmap::routes());
         all.extend(compose::routes());
+        all.extend(reports::routes());
         all
     }
 
     fn admin_sections(&self) -> Vec<AdminSection> {
-        vec![AdminSection {
-            path: "/admin/domains",
-            element: "ortus-mail-domains",
-            label: "domains",
-        }]
+        vec![
+            AdminSection {
+                path: "/admin/domains",
+                element: "ortus-mail-domains",
+                label: "domains",
+            },
+            AdminSection {
+                path: "/admin/deliverability",
+                element: "ortus-mail-deliverability",
+                label: "deliverability",
+            },
+        ]
     }
 
     fn role_tasks(&self) -> Vec<RoleTask> {

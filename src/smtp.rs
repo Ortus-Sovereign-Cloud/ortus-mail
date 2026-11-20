@@ -28,6 +28,8 @@ use crate::store;
 /// One line may be this long (RFC 5321 allows 1000; some senders exceed).
 const MAX_LINE: usize = 8_192;
 const MAX_RECIPIENTS: usize = 100;
+/// Stands for the report addresses among the recipients (no user id has it).
+const REPORTS: &str = "@reports";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn max_size() -> usize {
@@ -512,6 +514,15 @@ impl Session {
             return "250 2.1.5 OK\r\n".into();
         }
         let store = self.instance.store.as_ref();
+        let (local, domain) = address.rsplit_once('@').unwrap_or_default();
+        if crate::reports::REPORT_ADDRESSES.contains(&local)
+            && store::is_our_domain(store, domain).await.unwrap_or(false)
+        {
+            if !self.to.iter().any(|(_, u)| u == REPORTS) {
+                self.to.push((address, REPORTS.into()));
+            }
+            return "250 2.1.5 OK\r\n".into();
+        }
         match store::recipient(store, &address).await {
             Ok(Some(user)) => {
                 self.to.push((address, user));
@@ -618,6 +629,14 @@ impl Session {
         let mut delivered = 0;
         let sender = (!header_from.is_empty()).then(|| header_from.clone());
         for (_, user) in &self.to {
+            if user == REPORTS {
+                // DMARC and TLS reports are read, not filed.
+                match crate::reports::take(&self.instance, &message).await {
+                    Ok(_) => delivered += 1,
+                    Err(e) => eprintln!("ortus: mail: a report: {e}"),
+                }
+                continue;
+            }
             // Each person's own corrections count too.
             let mine = match crate::spam::personal(store, user, sender.as_deref(), &verdict).await {
                 Ok(mine) => mine,
