@@ -88,6 +88,7 @@ const messages: Record<MailKey, MailMessage> = {
   "catchUpSince": "منذ {time}",
   "needReply": {"zero": "لا شيء ينتظر ردًا.", "one": "رسالة واحدة تنتظر ردًا ({names}).", "two": "رسالتان تنتظران ردًا ({names}).", "few": "{count} رسائل تنتظر ردًا ({names}).", "many": "{count} رسالة تنتظر ردًا ({names}).", "other": "{count} رسالة تنتظر ردًا ({names})."},
   "showThe": {"zero": "عرض", "one": "عرضها", "two": "عرض الرسالتين", "few": "عرض الرسائل الـ{count}", "many": "عرض الرسائل الـ{count}", "other": "عرض الرسائل الـ{count}"},
+  "alertsLine": {"zero": "لا تنبيهات.", "one": "تنبيه واحد: {title}.", "two": "تنبيهان، آخرهما: {title}.", "few": "{count} تنبيهات، آخرها: {title}.", "many": "{count} تنبيهًا، آخرها: {title}.", "other": "{count} تنبيه، آخرها: {title}."},
   "loadFailed": "تعذّر تحميل البريد.",
   "tryAgain": "أعد المحاولة",
   "noResults": "لا رسائل تطابق «{q}»",

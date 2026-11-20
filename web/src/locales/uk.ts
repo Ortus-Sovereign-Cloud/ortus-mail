@@ -88,6 +88,7 @@ const messages: Record<MailKey, MailMessage> = {
   "catchUpSince": "з {time}",
   "needReply": {"one": "{count} чекає на відповідь ({names}).", "few": "{count} чекають на відповідь ({names}).", "many": "{count} чекають на відповідь ({names}).", "other": "{count} чекають на відповідь ({names})."},
   "showThe": {"one": "Показати", "few": "Показати ці {count}", "many": "Показати ці {count}", "other": "Показати ці {count}"},
+  "alertsLine": {"one": "Одна тривога: {title}.", "few": "{count} тривоги, остання: {title}.", "many": "{count} тривог, остання: {title}.", "other": "{count} тривоги, остання: {title}."},
   "loadFailed": "Не вдалося завантажити пошту.",
   "tryAgain": "Спробувати ще",
   "noResults": "Немає листів за запитом «{q}»",

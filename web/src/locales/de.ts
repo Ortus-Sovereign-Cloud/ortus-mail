@@ -88,6 +88,7 @@ const messages: Record<MailKey, MailMessage> = {
   "catchUpSince": "seit {time}",
   "needReply": {"one": "1 wartet auf Antwort ({names}).", "other": "{count} warten auf Antwort ({names})."},
   "showThe": {"one": "Anzeigen", "other": "Die {count} anzeigen"},
+  "alertsLine": {"one": "Ein Alarm: {title}.", "other": "{count} Alarme, der neueste: {title}."},
   "loadFailed": "Die E-Mails konnten nicht geladen werden.",
   "tryAgain": "Erneut versuchen",
   "noResults": "Keine E-Mail passt zu „{q}“",

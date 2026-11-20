@@ -88,6 +88,7 @@ const messages: Record<MailKey, MailMessage> = {
   "catchUpSince": "depuis {time}",
   "needReply": {"one": "{count} attend une réponse ({names}).", "many": "{count} attendent une réponse ({names}).", "other": "{count} attendent une réponse ({names})."},
   "showThe": {"one": "L’afficher", "many": "Afficher les {count}", "other": "Afficher les {count}"},
+  "alertsLine": {"one": "Une alerte : {title}.", "many": "{count} alertes, la dernière : {title}.", "other": "{count} alertes, la dernière : {title}."},
   "loadFailed": "Le courrier n’a pas pu être chargé.",
   "tryAgain": "Réessayer",
   "noResults": "Aucun message ne correspond à « {q} »",

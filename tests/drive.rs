@@ -45,6 +45,30 @@ impl Drive for Saved {
             })
         })
     }
+    fn create<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: &'a str,
+        _: &'a str,
+    ) -> BoxFuture<'a, Result<ortus_core::interfaces::ItemRef, String>> {
+        Box::pin(async { Err("not here".into()) })
+    }
+    fn describe<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ortus_core::interfaces::DriveItem>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn rename<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: &'a str,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("not here".into()) })
+    }
 }
 
 struct FakeDrive(Arc<Saved>);

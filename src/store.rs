@@ -202,6 +202,15 @@ pub const MIGRATIONS: &[Migration] = &[
     );
     CREATE INDEX mail_uploads_created ON mail_uploads (created_at)",
     },
+    Migration {
+        version: 9,
+        name: "visits, for the catch-up card",
+        sql: "CREATE TABLE mail_visits (
+        user_id TEXT PRIMARY KEY,
+        last_at BIGINT NOT NULL,
+        previous_at BIGINT NOT NULL
+    )",
+    },
 ];
 
 /// The mailboxes everyone has, by role, with their IMAP names.

@@ -89,6 +89,7 @@ const en = {
   "catchUpSince": "since {time}",
   "needReply": {"one": "1 needs a reply ({names}).", "other": "{count} need a reply ({names})."},
   "showThe": {"one": "Show it", "other": "Show the {count}"},
+  "alertsLine": {"one": "One alert: {title}.", "other": "{count} alerts, the latest: {title}."},
   "loadFailed": "Mail could not be loaded.",
   "tryAgain": "Try again",
   "noResults": "No mail matches “{q}”",

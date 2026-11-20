@@ -794,6 +794,9 @@ export class OrtusMailInbox extends LitElement {
   @state() private emails: Email[] | undefined;
   @state() private labels: string[] = [];
   @state() private catchUp: Email[] = [];
+  /** Alerts since the previous visit, and when that was (the server's). */
+  @state() private catchAlerts: { title: string; path: string }[] = [];
+  @state() private catchSince: number | null = null;
   @state() private thread: Email[] | undefined;
   @state() private expanded = new Set<string>();
   @state() private failed = false;
@@ -927,6 +930,14 @@ export class OrtusMailInbox extends LitElement {
       this.emails = emails;
       const mine = this.person?.email.toLowerCase();
       this.catchUp = ((answers.cl!.list as Email[]) ?? []).filter((e) => (e.to ?? []).some((a) => a.email?.toLowerCase() === mine) || waiting(e.ortusInvite));
+      if (this.place.box === "inbox" && this.catchSince === null) {
+        void call<{ since: number; alerts: { title: string; path: string }[] }>("GET", "/mail/catch-up")
+          .then((r) => {
+            this.catchSince = r.since;
+            this.catchAlerts = r.alerts;
+          })
+          .catch(() => undefined);
+      }
       if (this.place.thread) await this.openThread(this.place.thread, ticket);
       else this.thread = undefined;
     } catch (e) {
@@ -1119,23 +1130,26 @@ export class OrtusMailInbox extends LitElement {
   }
 
   private catchUpCard() {
-    if (!this.catchUp.length) return nothing;
-    const oldest = this.catchUp.reduce((a, b) => (a.receivedAt < b.receivedAt ? a : b));
+    if (!this.catchUp.length && !this.catchAlerts.length) return nothing;
+    const oldest = this.catchUp.length ? this.catchUp.reduce((a, b) => (a.receivedAt < b.receivedAt ? a : b)) : null;
     const invites = this.catchUp.filter((e) => waiting(e.ortusInvite));
     const replies = this.catchUp.filter((e) => !waiting(e.ortusInvite));
     const names = [...new Set(replies.map((e) => (who(e.from?.[0]) || "").split(" ")[0]))].slice(0, 3).join(", ");
     const lang = document.documentElement.lang || "en";
-    const since = new Intl.DateTimeFormat(lang, { weekday: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(oldest.receivedAt));
+    // Since the previous visit (else since the oldest of these).
+    const from = this.catchSince ?? (oldest ? new Date(oldest.receivedAt).getTime() : Date.now());
+    const since = new Intl.DateTimeFormat(lang, { weekday: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(from));
     const first = invites.map((e) => e.ortusInvite!.start).filter((x): x is number => x !== null).sort((a, b) => a - b)[0];
     const parts = [
       replies.length ? t(this.localize, "needReply", { count: replies.length, names }) : "",
       invites.length ? (first ? t(this.localize, "invitesFor", { count: invites.length, time: new Intl.DateTimeFormat(lang, { weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(first)) }) : t(this.localize, "invites", { count: invites.length })) : "",
+      this.catchAlerts.length ? t(this.localize, "alertsLine", { count: this.catchAlerts.length, title: this.catchAlerts[0]!.title }) : "",
     ].filter(Boolean);
     return html`
       <section class="catchup" aria-labelledby="catchup-title">
         <p class="head"><strong id="catchup-title">${t(this.localize, "catchUp")}</strong> · ${t(this.localize, "catchUpSince", { time: since })}</p>
         <p>${parts.join(" ")}</p>
-        <button class="button" @click=${() => this.go({ only: this.catchUp.map((e) => e.id), thread: null })}>${t(this.localize, "showThe", { count: this.catchUp.length })}</button>
+        ${this.catchUp.length ? html`<button class="button" @click=${() => this.go({ only: this.catchUp.map((e) => e.id), thread: null })}>${t(this.localize, "showThe", { count: this.catchUp.length })}</button>` : nothing}
       </section>
     `;
   }

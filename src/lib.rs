@@ -4,6 +4,7 @@
 //! to a program through [`apps`].
 
 pub mod admin;
+pub mod catchup;
 pub mod compose;
 pub mod domains;
 pub mod imap;
@@ -61,6 +62,7 @@ impl App for Mail {
         all.extend(reports::routes());
         all.extend(import::routes());
         all.extend(invites::routes());
+        all.extend(catchup::routes());
         all
     }
 
