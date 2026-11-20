@@ -134,6 +134,22 @@ async fn sign(instance: &Instance, domain: &str, raw: &[u8]) -> Vec<u8> {
     }
 }
 
+/// The label a mail app set in an `X-Ortus-Label` header, if any.
+fn label_header(raw: &[u8]) -> Option<String> {
+    let head_end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(raw.len());
+    String::from_utf8_lossy(&raw[..head_end])
+        .lines()
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(name, _)| name.eq_ignore_ascii_case("X-Ortus-Label"))
+                .map(|(_, v)| v.trim().to_ascii_lowercase())
+        })
+        .filter(|v| !v.is_empty())
+}
+
 /// Sends a message. Nothing goes anywhere unless every recipient may get it.
 pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refused> {
     let store = instance.store.as_ref();
@@ -152,6 +168,7 @@ pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refus
             address: String::new(),
         });
     }
+    let header_label = label_header(out.raw);
     // Who is here, who is outside; the policy decides for everyone outside
     // before anything is stored or sent.
     let mut here = Vec::new();
@@ -168,11 +185,18 @@ pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refus
             here.push(user);
             continue;
         }
+        // Only labelled mail is judged (a label chosen in compose, or an
+        // X-Ortus-Label header from a mail app): unlabelled mail goes out
+        // as mail always has.
+        let Some(label) = out.label.or(header_label.as_deref()) else {
+            away.entry(domain_of(&address)).or_default().push(address);
+            continue;
+        };
         let audience = Audience::Outside(address.clone());
         let ask = Ask {
             actor: out.user,
             action: Action::Share,
-            label: out.label,
+            label: Some(label),
             audience: &audience,
             channel: Channel::Mail,
             object: "mail:outgoing",

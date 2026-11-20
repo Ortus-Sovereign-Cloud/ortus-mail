@@ -118,7 +118,7 @@ fn mail_goes_out_signed_and_comes_back_when_it_cannot() {
             block_on(send::send(&a, &spoof))
         );
 
-        // INTERNAL to outside needs a reason (the default label); then it goes.
+        // Labelled INTERNAL, to outside, it needs a reason; then it goes.
         let to = vec![
             "anna@regional.example".to_string(),
             "sam@ministry.example".to_string(),
@@ -128,7 +128,7 @@ fn mail_goes_out_signed_and_comes_back_when_it_cannot() {
             from: "olena@ministry.example",
             to: &to,
             raw: &raw,
-            label: None,
+            label: Some("internal"),
             reason: None,
         };
         assert!(
@@ -187,7 +187,8 @@ fn mail_goes_out_signed_and_comes_back_when_it_cannot() {
                 from: "olena@ministry.example",
                 to: &to,
                 raw: &raw,
-                label: Some("public"),
+                // Unlabelled mail goes as mail always has.
+                label: None,
                 reason: None,
             },
         ))
@@ -201,8 +202,27 @@ fn mail_goes_out_signed_and_comes_back_when_it_cannot() {
             "{name}: {bounce}"
         );
 
-        // SECRET never leaves, and nothing is kept as sent.
+        // SECRET never leaves, and nothing is kept as sent; a mail app's
+        // label header counts the same.
         let before = inbox(&a, &olena, "sent").len();
+        let mut labelled = b"X-Ortus-Label: SECRET\r\n".to_vec();
+        labelled.extend(message("anna@regional.example", "from-an-app"));
+        let to_anna = vec!["anna@regional.example".to_string()];
+        let by_app = block_on(send::send(
+            &a,
+            &Outgoing {
+                user: &olena,
+                from: "olena@ministry.example",
+                to: &to_anna,
+                raw: &labelled,
+                label: None,
+                reason: None,
+            },
+        ));
+        assert!(
+            matches!(by_app, Err(Refused::Policy { .. })),
+            "{name}: {by_app:?}"
+        );
         let raw = message("anna@regional.example", "secret");
         let to = vec!["anna@regional.example".to_string()];
         let refused = block_on(send::send(
