@@ -1,3 +1,4 @@
+import { call } from "ortus-kit";
 // Moving between the mail app's screens without reloading, and the toast
 // that outlives the screen that raised it (sent, with undo).
 
@@ -15,4 +16,14 @@ export function navigate(url: string): void {
 
 export function toast(detail: Toast): void {
   window.dispatchEvent(new CustomEvent<Toast>("ortus-mail-toast", { detail }));
+}
+
+let calendarCheck: Promise<boolean> | undefined;
+
+/** Whether the calendar app is installed and on (asked once). */
+export function calendarInstalled(): Promise<boolean> {
+  calendarCheck ??= call<{ apps: { id: string }[] }>("GET", "/apps")
+    .then((r) => r.apps.some((a) => a.id === "calendar"))
+    .catch(() => false);
+  return calendarCheck;
 }

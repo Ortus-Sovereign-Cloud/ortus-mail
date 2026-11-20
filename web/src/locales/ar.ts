@@ -247,6 +247,22 @@ const messages: Record<MailKey, MailMessage> = {
   "timesFailed": "تعذّر البحث عن الأوقات المتاحة. حاول مرة أخرى.",
   "pickLine": "اختر وقتًا يناسبك (لا حاجة إلى حساب): {url}",
   "meeting": "اجتماع",
+  "invitesFor": {"zero": "لا دعوات.", "one": "دعوة واحدة في {time}.", "two": "دعوتان، الأولى {time}.", "few": "{count} دعوات، الأولى {time}.", "many": "{count} دعوة، الأولى {time}.", "other": "{count} دعوة، الأولى {time}."},
+  "invites": {"zero": "لا دعوات.", "one": "دعوة واحدة.", "two": "دعوتان.", "few": "{count} دعوات.", "many": "{count} دعوة.", "other": "{count} دعوة."},
+  "invite": "دعوة",
+  "invitation": "دعوة",
+  "accept": "قبول",
+  "maybe": "ربما",
+  "decline": "رفض",
+  "yourAnswer": "ردّك",
+  "youAreFree": "أنت متاح",
+  "overlaps": "يتداخل مع «{what}»",
+  "inviteCancelled": "أُلغي",
+  "repliedAccepted": "قبل {name} «{what}».",
+  "repliedTentative": "قد يحضر {name} «{what}».",
+  "repliedDeclined": "رفض {name} «{what}».",
+  "allDay": "طوال اليوم",
+  "inMinutes": {"zero": "بعد {count} دقيقة", "one": "بعد دقيقة", "two": "بعد دقيقتين", "few": "بعد {count} دقائق", "many": "بعد {count} دقيقة", "other": "بعد {count} دقيقة"},
 };
 
 export default messages;

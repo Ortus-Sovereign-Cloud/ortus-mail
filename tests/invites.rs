@@ -25,7 +25,7 @@ fn inv(uid: &str) -> Invitation {
     Invitation {
         uid: uid.into(),
         method: "REQUEST".into(),
-        summary: "Review".into(),
+        summary: "Shelter agreement review".into(),
         start_ms: Some(1),
         end_ms: Some(2),
         organizer: Some("olena@ministry.example".into()),
@@ -48,6 +48,19 @@ impl Calendar for Book {
         ));
         Box::pin(async { Ok(inv("review")) })
     }
+    fn invitation<'a>(
+        &'a self,
+        _: &'a str,
+        uid: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Invitation>, String>> {
+        let found = (uid == "review@ministry.example").then(|| Invitation {
+            answer: Some("TENTATIVE".into()),
+            start_ms: Some(1_795_672_800_000),
+            end_ms: Some(1_795_674_600_000),
+            ..inv(uid)
+        });
+        Box::pin(async move { Ok(found) })
+    }
     fn respond<'a>(
         &'a self,
         user: &'a str,
@@ -69,7 +82,7 @@ impl Calendar for Book {
         Box::pin(async {
             Ok(vec![AgendaItem {
                 uid: "review@ministry.example".into(),
-                summary: "Review".into(),
+                summary: "Shelter agreement review".into(),
                 start_ms: 1_795_672_800_000,
                 end_ms: 1_795_674_600_000,
                 all_day: false,

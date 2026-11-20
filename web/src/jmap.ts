@@ -68,9 +68,27 @@ export interface Email {
   ortusVerified?: boolean;
   ortusCategory?: string;
   ortusSnoozedUntil?: string | null;
+  ortusInvite?: Invite | null;
 }
 
-export const LIST_PROPERTIES = ["threadId", "subject", "from", "to", "receivedAt", "preview", "keywords", "mailboxIds", "hasAttachment", "ortusCategory"];
+/** A message's invitation, as the person's calendar has it. */
+export interface Invite {
+  uid: string;
+  /** REQUEST, REPLY, CANCEL or PUBLISH. */
+  method: string;
+  summary: string;
+  organizer: string | null;
+  start: number | null;
+  end: number | null;
+  /** The person's answer: NEEDS-ACTION, ACCEPTED, TENTATIVE, DECLINED. */
+  answer: string | null;
+  cancelled: boolean;
+  inCalendar: boolean;
+  /** In a REPLY, the sender's answer. */
+  replied: string | null;
+}
+
+export const LIST_PROPERTIES = ["threadId", "subject", "from", "to", "receivedAt", "preview", "keywords", "mailboxIds", "hasAttachment", "ortusCategory", "ortusInvite"];
 export const READ_PROPERTIES = [...LIST_PROPERTIES, "cc", "replyTo", "messageId", "references", "attachments", "ortusText", "ortusVerified", "ortusSnoozedUntil"];
 
 /** Labels are keywords of one's own (not the `$` system ones). */

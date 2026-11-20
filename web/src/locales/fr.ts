@@ -247,6 +247,22 @@ const messages: Record<MailKey, MailMessage> = {
   "timesFailed": "Impossible de consulter les disponibilités. Réessayez.",
   "pickLine": "Choisissez un créneau qui vous convient (aucun compte nécessaire) : {url}",
   "meeting": "Réunion",
+  "invitesFor": {"one": "1 invitation pour {time}.", "other": "{count} invitations, la première {time}."},
+  "invites": {"one": "1 invitation.", "other": "{count} invitations."},
+  "invite": "Invitation",
+  "invitation": "Invitation",
+  "accept": "Accepter",
+  "maybe": "Peut-être",
+  "decline": "Refuser",
+  "yourAnswer": "Votre réponse",
+  "youAreFree": "Vous êtes libre",
+  "overlaps": "Chevauche « {what} »",
+  "inviteCancelled": "Annulé",
+  "repliedAccepted": "{name} a accepté « {what} ».",
+  "repliedTentative": "{name} viendra peut-être à « {what} ».",
+  "repliedDeclined": "{name} a refusé « {what} ».",
+  "allDay": "Toute la journée",
+  "inMinutes": {"one": "dans {count} min", "other": "dans {count} min"},
 };
 
 export default messages;

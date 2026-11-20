@@ -247,6 +247,22 @@ const messages: Record<MailKey, MailMessage> = {
   "timesFailed": "Не вдалося знайти вільний час. Спробуйте ще раз.",
   "pickLine": "Оберіть зручний час (обліковий запис не потрібен): {url}",
   "meeting": "Зустріч",
+  "invitesFor": {"one": "1 запрошення на {time}.", "few": "{count} запрошення, перше {time}.", "many": "{count} запрошень, перше {time}.", "other": "{count} запрошення, перше {time}."},
+  "invites": {"one": "1 запрошення.", "few": "{count} запрошення.", "many": "{count} запрошень.", "other": "{count} запрошення."},
+  "invite": "Запрошення",
+  "invitation": "Запрошення",
+  "accept": "Прийняти",
+  "maybe": "Можливо",
+  "decline": "Відхилити",
+  "yourAnswer": "Ваша відповідь",
+  "youAreFree": "Ви вільні",
+  "overlaps": "Збігається з «{what}»",
+  "inviteCancelled": "Скасовано",
+  "repliedAccepted": "{name} приймає «{what}».",
+  "repliedTentative": "{name}, можливо, прийде на «{what}».",
+  "repliedDeclined": "{name} відхиляє «{what}».",
+  "allDay": "Увесь день",
+  "inMinutes": {"one": "за {count} хв", "few": "за {count} хв", "many": "за {count} хв", "other": "за {count} хв"},
 };
 
 export default messages;

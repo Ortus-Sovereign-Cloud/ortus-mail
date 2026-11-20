@@ -107,13 +107,12 @@ test.describe("flows", () => {
 });
 
 test("without the calendar app, Compose offers no times", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
   await page.goto("/mail/compose");
   const to = compose(page).getByRole("combobox", { name: en.to });
   await to.fill("anna@regional.example");
   await to.press("Enter");
-  const times = compose(page).getByRole("button", { name: en.timesThatWork });
-  await expect(times).toBeEnabled();
-  await times.click();
-  await expect(times).toHaveCount(0);
-  await expect(compose(page).getByRole("alert")).toHaveCount(0);
+  await expect(compose(page).getByRole("button", { name: en.timesThatWork })).toHaveCount(0);
+  expect(errors).toEqual([]);
 });

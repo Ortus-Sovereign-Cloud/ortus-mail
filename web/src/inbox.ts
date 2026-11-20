@@ -1,11 +1,11 @@
 // The inbox (board Main): folders and labels, the list with its tabs and
 // catch-up card, the thread being read with a quick reply, and the day's
 // agenda column.
-import { LitElement, LocalizeController, controls, css, customElement, html, me, nothing, repeat, state, svg, type Me } from "ortus-kit";
+import { ApiError, LitElement, LocalizeController, call, controls, css, customElement, html, me, nothing, repeat, state, svg, type Me } from "ortus-kit";
 import { t } from "./i18n.js";
-import { LIST_PROPERTIES, MethodError, READ_PROPERTIES, jmap, labelsOf, type Email, type EmailAddress, type Mailbox } from "./jmap.js";
+import { LIST_PROPERTIES, MethodError, READ_PROPERTIES, jmap, labelsOf, type Email, type EmailAddress, type Invite, type Mailbox } from "./jmap.js";
 import type { MailKey } from "./locales/en.js";
-import { navigate } from "./events.js";
+import { calendarInstalled, navigate } from "./events.js";
 
 const ICON_ARCHIVE = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4"/></svg>`;
 const ICON_TRASH = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>`;
@@ -66,6 +66,21 @@ function tone(text: string): string {
   let h = 0;
   for (const c of text) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return `tone${h % 6}`;
+}
+
+/** An event of the day, from the calendar app. */
+interface AgendaItem {
+  uid: string;
+  summary: string;
+  start: number;
+  end: number;
+  allDay: boolean;
+  answer: string | null;
+}
+
+/** An invitation still waiting for the person's answer. */
+function waiting(inv: Invite | null | undefined): boolean {
+  return Boolean(inv && inv.method !== "REPLY" && inv.method !== "CANCEL" && !inv.cancelled && inv.inCalendar && inv.answer === "NEEDS-ACTION");
 }
 
 function who(a: EmailAddress | undefined | null): string {
@@ -603,6 +618,91 @@ export class OrtusMailInbox extends LitElement {
       .note.error {
         color: var(--ortus-red);
       }
+      .events {
+        display: grid;
+        gap: 12px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .event {
+        display: grid;
+        gap: 6px;
+        padding-block: 16px;
+        padding-inline: 16px;
+        border-radius: 14px;
+        border: 1px solid transparent;
+        background: var(--ortus-surface);
+        color: var(--ortus-text);
+        text-decoration: none;
+      }
+      .event.next {
+        border-color: var(--ortus-line-strong);
+        border-inline-start: 2px solid var(--ortus-accent);
+        background: var(--ortus-surface-2);
+      }
+      .event small {
+        font-size: 13px;
+        color: var(--ortus-text-3);
+      }
+      .event strong {
+        font-size: 15px;
+        font-weight: 600;
+      }
+      .chip.invite {
+        background: color-mix(in srgb, var(--ortus-teal) 18%, transparent);
+        color: var(--ortus-teal);
+      }
+      .invite {
+        display: grid;
+        gap: 16px;
+        margin-block: 20px;
+        padding: 20px;
+        border-radius: 16px;
+        border: 1px solid var(--ortus-line-strong);
+      }
+      .invite .when {
+        display: flex;
+        gap: 16px;
+        align-items: center;
+      }
+      .invite .day {
+        display: grid;
+        place-items: center;
+        inline-size: 52px;
+        block-size: 52px;
+        border-radius: 12px;
+        background: var(--ortus-surface-2);
+      }
+      .invite .day small {
+        font-size: 12px;
+        color: var(--ortus-accent);
+        font-weight: 600;
+      }
+      .invite .day strong {
+        font-size: 20px;
+      }
+      .invite p {
+        margin-block: 4px 0;
+        margin-inline: 0;
+        font-size: 14px;
+        color: var(--ortus-text-2);
+      }
+      .invite .free {
+        color: var(--ortus-teal);
+      }
+      .invite .busy {
+        color: var(--ortus-orange);
+      }
+      .invite .answers {
+        display: flex;
+        gap: 8px;
+      }
+      .invite-note {
+        margin-block: 16px;
+        color: var(--ortus-text-2);
+        font-size: 14px;
+      }
       .agenda .head {
         display: flex;
         justify-content: space-between;
@@ -686,6 +786,13 @@ export class OrtusMailInbox extends LitElement {
   @state() private sending = false;
   @state() private scheduled: { id: string; emailId: string; sendAt: string; ortusState: string; ortusError: string | null }[] = [];
   @state() private snoozeOpen = false;
+  /** Today's events, from the calendar (null: no calendar app). */
+  @state() private agenda: AgendaItem[] | null = null;
+  @state() private now = Date.now();
+  /** For each invitation shown, what else is on at that time. */
+  @state() private overlaps = new Map<string, string[]>();
+  @state() private answering = "";
+  private agendaTimer: number | undefined;
   private person: Me | undefined;
   private events: EventSource | undefined;
   private loads = 0;
@@ -695,11 +802,17 @@ export class OrtusMailInbox extends LitElement {
     super.connectedCallback();
     window.addEventListener("popstate", this.onPop);
     void this.start();
+    void this.loadAgenda();
+    this.agendaTimer = window.setInterval(() => {
+      this.now = Date.now();
+      void this.loadAgenda();
+    }, 60_000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener("popstate", this.onPop);
+    window.clearInterval(this.agendaTimer);
     this.events?.close();
     this.events = undefined;
   }
@@ -782,7 +895,7 @@ export class OrtusMailInbox extends LitElement {
         ["Email/query", { filter: this.filter(), sort: [{ property: "receivedAt", isAscending: false }], collapseThreads: true, limit: 100 }, "q"],
         ["Email/get", { "#ids": { resultOf: "q", name: "Email/query", path: "/ids" }, properties: LIST_PROPERTIES }, "l"],
         ["Email/query", { filter: { operator: "AND", conditions: [{ inMailbox: inbox }, { ortusCategory: "important" }, { notKeyword: "$seen" }] }, limit: 20 }, "c"],
-        ["Email/get", { "#ids": { resultOf: "c", name: "Email/query", path: "/ids" }, properties: ["from", "to", "receivedAt", "subject"] }, "cl"],
+        ["Email/get", { "#ids": { resultOf: "c", name: "Email/query", path: "/ids" }, properties: ["from", "to", "receivedAt", "subject", "ortusInvite"] }, "cl"],
       ]);
       if (ticket !== this.loads) return;
       let emails = (answers.l!.list as Email[]) ?? [];
@@ -795,12 +908,59 @@ export class OrtusMailInbox extends LitElement {
       if (this.place.only) emails = emails.filter((e) => this.place.only!.includes(e.id));
       this.emails = emails;
       const mine = this.person?.email.toLowerCase();
-      this.catchUp = ((answers.cl!.list as Email[]) ?? []).filter((e) => (e.to ?? []).some((a) => a.email?.toLowerCase() === mine));
+      this.catchUp = ((answers.cl!.list as Email[]) ?? []).filter((e) => (e.to ?? []).some((a) => a.email?.toLowerCase() === mine) || waiting(e.ortusInvite));
       if (this.place.thread) await this.openThread(this.place.thread, ticket);
       else this.thread = undefined;
     } catch (e) {
       if (ticket === this.loads) this.failed = true;
       console.warn("mail: could not load", e);
+    }
+  }
+
+  /** Today's events, for the agenda column. */
+  private async loadAgenda(): Promise<void> {
+    const from = startOfToday();
+    if (!(await calendarInstalled())) {
+      this.agenda = null;
+      return;
+    }
+    try {
+      const r = await call<{ events: AgendaItem[] }>("GET", `/calendar/events?from=${from}&to=${from + 86_400_000}`);
+      this.agenda = r.events.filter((e) => e.answer !== "DECLINED").sort((a, b) => a.start - b.start);
+    } catch {
+      this.agenda = null;
+    }
+  }
+
+  /** What else is on when each invitation in the thread is. */
+  private async findOverlaps(messages: Email[]): Promise<void> {
+    const found = new Map<string, string[]>();
+    if (!(await calendarInstalled())) return;
+    for (const m of messages) {
+      const inv = m.ortusInvite;
+      if (!inv?.start || !inv.end || inv.method === "REPLY" || inv.cancelled) continue;
+      try {
+        const r = await call<{ events: AgendaItem[] }>("GET", `/calendar/events?from=${inv.start}&to=${inv.end}`);
+        found.set(m.id, r.events.filter((e) => e.uid !== inv.uid && e.answer !== "DECLINED").map((e) => e.summary));
+      } catch {
+        /* no calendar */
+      }
+    }
+    this.overlaps = found;
+  }
+
+  private async answerInvite(m: Email, answer: string): Promise<void> {
+    this.answering = m.id;
+    this.replyNote = null;
+    try {
+      const done = await call<{ answer: string | null }>("POST", `/mail/messages/${encodeURIComponent(m.id)}/rsvp`, { answer });
+      this.thread = this.thread?.map((x) => (x.id === m.id && x.ortusInvite ? { ...x, ortusInvite: { ...x.ortusInvite, answer: done.answer } } : x));
+      void this.loadAgenda();
+      void this.load(true);
+    } catch (e) {
+      this.replyNote = { error: true, text: e instanceof ApiError ? e.message : t(this.localize, "sendFailed") };
+    } finally {
+      this.answering = "";
     }
   }
 
@@ -818,6 +978,7 @@ export class OrtusMailInbox extends LitElement {
       this.replyNote = null;
     }
     this.thread = messages;
+    void this.findOverlaps(messages);
     const unread = messages.filter((m) => !m.keywords.$seen);
     if (unread.length) {
       const update: Record<string, unknown> = {};
@@ -882,7 +1043,7 @@ export class OrtusMailInbox extends LitElement {
             <h2 id="agenda-title">${t(this.localize, "agendaToday")}</h2>
             <span class="date">${new Intl.DateTimeFormat(document.documentElement.lang || "en", { weekday: "short", day: "numeric", month: "short" }).format(new Date())}</span>
           </div>
-          <p class="quiet">${t(this.localize, "agendaEmpty")}</p>
+          ${this.renderAgenda()}
         </aside>
       </div>
     `;
@@ -933,13 +1094,20 @@ export class OrtusMailInbox extends LitElement {
   private catchUpCard() {
     if (!this.catchUp.length) return nothing;
     const oldest = this.catchUp.reduce((a, b) => (a.receivedAt < b.receivedAt ? a : b));
-    const names = [...new Set(this.catchUp.map((e) => (who(e.from?.[0]) || "").split(" ")[0]))].slice(0, 3).join(", ");
+    const invites = this.catchUp.filter((e) => waiting(e.ortusInvite));
+    const replies = this.catchUp.filter((e) => !waiting(e.ortusInvite));
+    const names = [...new Set(replies.map((e) => (who(e.from?.[0]) || "").split(" ")[0]))].slice(0, 3).join(", ");
     const lang = document.documentElement.lang || "en";
     const since = new Intl.DateTimeFormat(lang, { weekday: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(oldest.receivedAt));
+    const first = invites.map((e) => e.ortusInvite!.start).filter((x): x is number => x !== null).sort((a, b) => a - b)[0];
+    const parts = [
+      replies.length ? t(this.localize, "needReply", { count: replies.length, names }) : "",
+      invites.length ? (first ? t(this.localize, "invitesFor", { count: invites.length, time: new Intl.DateTimeFormat(lang, { weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(first)) }) : t(this.localize, "invites", { count: invites.length })) : "",
+    ].filter(Boolean);
     return html`
       <section class="catchup" aria-labelledby="catchup-title">
         <p class="head"><strong id="catchup-title">${t(this.localize, "catchUp")}</strong> · ${t(this.localize, "catchUpSince", { time: since })}</p>
-        <p>${t(this.localize, "needReply", { count: this.catchUp.length, names })}</p>
+        <p>${parts.join(" ")}</p>
         <button class="button" @click=${() => this.go({ only: this.catchUp.map((e) => e.id), thread: null })}>${t(this.localize, "showThe", { count: this.catchUp.length })}</button>
       </section>
     `;
@@ -980,7 +1148,7 @@ export class OrtusMailInbox extends LitElement {
               <span class="from" dir="auto">${e.keywords.$seen ? nothing : html`<span class="sr">${t(this.localize, "unread")}</span>`}${person || t(this.localize, "noSender")}</span>
               <span class="time">${this.timeFor(e)}</span>
               <span class="subject" dir="auto">${e.subject || t(this.localize, "noSubject")}</span>
-              <span>${labels[0] ? html`<span class="chip ${tone(labels[0])}">${this.label(labels[0])}</span>` : nothing}</span>
+              <span>${waiting(e.ortusInvite) ? html`<span class="chip invite">${t(this.localize, "invite")}</span>` : labels[0] ? html`<span class="chip ${tone(labels[0])}">${this.label(labels[0])}</span>` : nothing}</span>
             </button>
           </li>`;
         },
@@ -1056,6 +1224,7 @@ export class OrtusMailInbox extends LitElement {
         <span class="time">${this.when(m.receivedAt)}</span>
       </div>
       <p class="body" dir="auto">${m.ortusText ?? m.preview}</p>
+      ${m.ortusInvite ? this.inviteCard(m, m.ortusInvite) : nothing}
       ${m.attachments?.length
         ? html`<div class="files">
             ${m.attachments.map((a) => {
@@ -1068,6 +1237,67 @@ export class OrtusMailInbox extends LitElement {
           </div>`
         : nothing}
     </article>`;
+  }
+
+  /** The invitation in a message: when, whether one is free, the answer. */
+  private inviteCard(m: Email, inv: Invite) {
+    const lang = document.documentElement.lang || "en";
+    const sender = (who(m.from?.[0]) || "").split(" ")[0] ?? "";
+    if (inv.method === "REPLY") {
+      const key = inv.replied === "ACCEPTED" ? "repliedAccepted" : inv.replied === "TENTATIVE" ? "repliedTentative" : inv.replied === "DECLINED" ? "repliedDeclined" : null;
+      return key ? html`<p class="invite-note" role="status">${t(this.localize, key, { name: sender, what: inv.summary })}</p>` : nothing;
+    }
+    const time = (ms: number) => new Intl.DateTimeFormat(lang, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(ms));
+    const others = this.overlaps.get(m.id);
+    const status = inv.cancelled
+      ? t(this.localize, "inviteCancelled")
+      : others === undefined
+        ? ""
+        : others.length
+          ? t(this.localize, "overlaps", { what: others[0] ?? "" })
+          : t(this.localize, "youAreFree");
+    const answers: [string, MailKey][] = [
+      ["accepted", "accept"],
+      ["tentative", "maybe"],
+      ["declined", "decline"],
+    ];
+    return html`<section class="invite" aria-label=${t(this.localize, "invitation")}>
+      <div class="when">
+        ${inv.start
+          ? html`<span class="day" aria-hidden="true"><small>${new Intl.DateTimeFormat(lang, { weekday: "short" }).format(new Date(inv.start))}</small><strong>${new Date(inv.start).getDate()}</strong></span>`
+          : nothing}
+        <div>
+          <strong dir="auto">${inv.summary}</strong>
+          <p>
+            ${inv.start ? html`<time datetime=${new Date(inv.start).toISOString()}>${new Intl.DateTimeFormat(lang, { weekday: "long", day: "numeric", month: "long" }).format(new Date(inv.start))}, ${time(inv.start)}${inv.end ? `–${time(inv.end)}` : ""}</time>` : nothing}${status ? html` · <span class=${others?.length || inv.cancelled ? "busy" : "free"}>${status}</span>` : nothing}
+          </p>
+        </div>
+      </div>
+      ${inv.cancelled || !inv.inCalendar || inv.answer === null
+        ? nothing
+        : html`<div class="answers" role="group" aria-label=${t(this.localize, "yourAnswer")}>
+            ${answers.map(([a, key]) => html`<button class="button ${inv.answer === a.toUpperCase() ? "primary" : ""}" aria-pressed=${inv.answer === a.toUpperCase() ? "true" : "false"} ?disabled=${this.answering === m.id} @click=${() => this.answerInvite(m, a)}>${t(this.localize, key)}</button>`)}
+          </div>`}
+    </section>`;
+  }
+
+  private renderAgenda() {
+    const lang = document.documentElement.lang || "en";
+    const time = (ms: number) => new Intl.DateTimeFormat(lang, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(ms));
+    const items = (this.agenda ?? []).filter((e) => e.end > this.now || e.allDay);
+    const next = items.find((e) => !e.allDay && e.start > this.now);
+    if (!items.length) return html`<p class="quiet">${t(this.localize, "agendaEmpty")}</p>`;
+    return html`<ol class="events">
+      ${items.map((e) => {
+        const soon = e === next && e.start - this.now <= 60 * 60_000;
+        return html`<li>
+          <a class="event ${soon ? "next" : ""}" href="/calendar?view=day">
+            <small>${e.allDay ? t(this.localize, "allDay") : `${time(e.start)} – ${time(e.end)}`}${soon ? ` · ${t(this.localize, "inMinutes", { count: Math.max(1, Math.round((e.start - this.now) / 60_000)) })}` : ""}</small>
+            <strong dir="auto">${e.summary}</strong>
+          </a>
+        </li>`;
+      })}
+    </ol>`;
   }
 
   private banner(last: Email) {

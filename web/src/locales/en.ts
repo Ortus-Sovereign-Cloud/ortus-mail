@@ -248,6 +248,22 @@ const en = {
   "timesFailed": "Could not look up free times. Try again.",
   "pickLine": "Pick a time that works for you (no account needed): {url}",
   "meeting": "Meeting",
+  "invitesFor": {"one": "1 invite for {time}.", "other": "{count} invites, the first {time}."},
+  "invites": {"one": "1 invite.", "other": "{count} invites."},
+  "invite": "Invite",
+  "invitation": "Invitation",
+  "accept": "Accept",
+  "maybe": "Maybe",
+  "decline": "Decline",
+  "yourAnswer": "Your answer",
+  "youAreFree": "You're free",
+  "overlaps": "Overlaps “{what}”",
+  "inviteCancelled": "Cancelled",
+  "repliedAccepted": "{name} accepted “{what}”.",
+  "repliedTentative": "{name} might come to “{what}”.",
+  "repliedDeclined": "{name} declined “{what}”.",
+  "allDay": "All day",
+  "inMinutes": {"one": "in {count} min", "other": "in {count} min"},
 };
 
 export type MailKey = keyof typeof en;

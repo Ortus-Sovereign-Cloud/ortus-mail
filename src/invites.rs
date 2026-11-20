@@ -177,26 +177,48 @@ pub async fn shown(instance: &Instance, user: &str, raw: &[u8]) -> Option<Value>
             })
     };
     let uid = field("UID")?;
+    // The sender's own answer, in a REPLY.
+    let replied = text
+        .replace("\r\n ", "")
+        .replace("\n ", "")
+        .lines()
+        .find_map(|l| {
+            let upper = l.to_ascii_uppercase();
+            if !upper.starts_with("ATTENDEE") {
+                return None;
+            }
+            upper
+                .split([';', ':'])
+                .find_map(|p| p.strip_prefix("PARTSTAT=").map(str::to_string))
+        });
     let mut answer = None;
     let mut start = None;
     let mut end = None;
+    let mut summary = field("SUMMARY")
+        .unwrap_or_default()
+        .replace("\\,", ",")
+        .replace("\\;", ";");
     let mut cancelled = method == "CANCEL";
+    let mut in_calendar = false;
     if let Some(calendar) = calendar(instance).await {
         // The person's copy says when, and how they answered.
-        if let Ok(items) = calendar.agenda(user, 0, i64::MAX / 4).await {
-            if let Some(item) = items.iter().find(|i| i.uid == uid) {
-                answer = item.answer.clone();
-                start = Some(item.start_ms);
-                end = Some(item.end_ms);
-            } else if method != "REPLY" {
-                cancelled = true;
+        if let Ok(Some(copy)) = calendar.invitation(user, &uid).await {
+            in_calendar = true;
+            answer = copy.answer;
+            start = copy.start_ms;
+            end = copy.end_ms;
+            cancelled |= copy.cancelled;
+            if !copy.summary.is_empty() {
+                summary = copy.summary;
             }
         }
     }
     Some(json!({
         "uid": uid,
         "method": method,
-        "summary": field("SUMMARY").unwrap_or_default().replace("\\,", ",").replace("\\;", ";"),
+        "summary": summary,
+        "inCalendar": in_calendar,
+        "replied": if method == "REPLY" { replied } else { None },
         "organizer": field("ORGANIZER").map(|o| o.trim_start_matches("mailto:").trim_start_matches("MAILTO:").to_ascii_lowercase()),
         "start": start,
         "end": end,

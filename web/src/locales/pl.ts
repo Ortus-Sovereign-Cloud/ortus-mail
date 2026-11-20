@@ -247,6 +247,22 @@ const messages: Record<MailKey, MailMessage> = {
   "timesFailed": "Nie udało się sprawdzić wolnych terminów. Spróbuj ponownie.",
   "pickLine": "Wybierz pasujący termin (konto nie jest potrzebne): {url}",
   "meeting": "Spotkanie",
+  "invitesFor": {"one": "1 zaproszenie na {time}.", "few": "{count} zaproszenia, pierwsze {time}.", "many": "{count} zaproszeń, pierwsze {time}.", "other": "{count} zaproszenia, pierwsze {time}."},
+  "invites": {"one": "1 zaproszenie.", "few": "{count} zaproszenia.", "many": "{count} zaproszeń.", "other": "{count} zaproszenia."},
+  "invite": "Zaproszenie",
+  "invitation": "Zaproszenie",
+  "accept": "Akceptuj",
+  "maybe": "Może",
+  "decline": "Odrzuć",
+  "yourAnswer": "Twoja odpowiedź",
+  "youAreFree": "Masz wolne",
+  "overlaps": "Nakłada się na „{what}”",
+  "inviteCancelled": "Odwołane",
+  "repliedAccepted": "{name} akceptuje „{what}”.",
+  "repliedTentative": "{name} może przyjdzie na „{what}”.",
+  "repliedDeclined": "{name} odrzuca „{what}”.",
+  "allDay": "Cały dzień",
+  "inMinutes": {"one": "za {count} min", "few": "za {count} min", "many": "za {count} min", "other": "za {count} min"},
 };
 
 export default messages;

@@ -4,7 +4,7 @@
 import { ApiError, LitElement, LocalizeController, call, controls, css, customElement, html, nothing, state, svg } from "ortus-kit";
 import { t } from "./i18n.js";
 import { jmap, type Email, type EmailAddress } from "./jmap.js";
-import { navigate, toast } from "./events.js";
+import { calendarInstalled, navigate, toast } from "./events.js";
 
 const ICON_BACK = svg`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>`;
 const ICON_CALENDAR = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>`;
@@ -555,6 +555,7 @@ export class OrtusMailCompose extends LitElement {
   }
 
   private async start(): Promise<void> {
+    void calendarInstalled().then((on) => (this.noCalendar = !on));
     const p = new URLSearchParams(location.search);
     const [ids, labels] = await Promise.all([jmap([["Identity/get", {}, "i"]]), call<{ labels: { id: string; name: string }[] }>("GET", "/mail/labels").catch(() => ({ labels: [] }))]);
     this.identities = (ids.i!.list as Identity[]) ?? [];

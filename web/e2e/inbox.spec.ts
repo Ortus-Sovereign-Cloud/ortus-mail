@@ -93,3 +93,36 @@ test("new mail appears while the inbox is open", async ({ page }) => {
   await importMessage(page.request, token, me.id, id, "From: Marek Nowak <marek@ministry.example>\nTo: olena@ministry.example\nSubject: Shelter capacity sheet\nMessage-ID: <cap@ministry.example>\n\nUpdated numbers.\n", {});
   await expect(inbox(page).getByRole("button", { name: /Marek Nowak/ })).toBeVisible({ timeout: 10_000 });
 });
+
+test("an invitation shows its card; without the calendar app there is nothing to answer", async ({ page }) => {
+  await page.goto("/mail");
+  const me = await (await page.request.get("/api/v1/me")).json();
+  const token = (await page.context().cookies()).find((c) => c.name === "ortus")?.value ?? "";
+  const boxes = await (await page.request.post("/api/v1/mail/web/jmap", { headers: { "X-Requested-With": "ortus" }, data: { using: ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"], methodCalls: [["Mailbox/get", {}, "0"]] } })).json();
+  const id = boxes.methodResponses[0][1].list.find((b: { role: string }) => b.role === "inbox").id;
+  const raw = [
+    "From: Daniel Price <daniel@hydro.example>",
+    "To: olena@ministry.example",
+    "Subject: Invitation: river levels",
+    "Message-ID: <levels@hydro.example>",
+    "MIME-Version: 1.0",
+    'Content-Type: multipart/alternative; boundary="b"',
+    "",
+    "--b",
+    "Content-Type: text/plain",
+    "",
+    "Join us.",
+    "--b",
+    "Content-Type: text/calendar; method=REQUEST",
+    "",
+    "BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:REQUEST\nBEGIN:VEVENT\nUID:levels@hydro.example\nDTSTAMP:20261120T090000Z\nDTSTART:20261126T140000Z\nDTEND:20261126T143000Z\nSUMMARY:River levels\nORGANIZER:mailto:daniel@hydro.example\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:olena@ministry.example\nEND:VEVENT\nEND:VCALENDAR",
+    "--b--",
+    "",
+  ].join("\n");
+  await importMessage(page.request, token, me.id, id, raw, {});
+  await inbox(page).getByRole("button", { name: /Daniel Price.*river levels/i }).click();
+  const card = inbox(page).getByRole("region", { name: en.invitation, exact: true });
+  await expect(card).toContainText("River levels");
+  await expect(card.getByRole("group", { name: en.yourAnswer })).toHaveCount(0);
+  await expect(inbox(page).getByRole("complementary").filter({ hasText: en.agendaToday })).toContainText(en.agendaEmpty);
+});
