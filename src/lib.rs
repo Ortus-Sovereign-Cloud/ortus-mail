@@ -13,6 +13,7 @@ pub mod invites;
 pub mod jmap;
 pub mod later;
 pub mod reports;
+pub mod restore;
 pub mod send;
 pub mod smtp;
 pub mod spam;
@@ -278,6 +279,31 @@ impl App for Mail {
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         })
+    }
+
+    fn restorable(&self) -> &'static [&'static str] {
+        &["folder"]
+    }
+
+    fn restore_choices<'a>(
+        &'a self,
+        point: &'a ortus_core::points::Snapshot,
+        user: &'a str,
+        _what: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<(String, String)>, String>> {
+        Box::pin(restore::choices(point, user))
+    }
+
+    fn restore<'a>(
+        &'a self,
+        instance: &'a Arc<Instance>,
+        point: &'a ortus_core::points::Snapshot,
+        user: &'a str,
+        _what: &'a str,
+        id: &'a str,
+        into: &'a str,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(restore::folder(instance, point, user, id, into))
     }
 }
 
