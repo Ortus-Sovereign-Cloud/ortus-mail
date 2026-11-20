@@ -3,10 +3,15 @@
 //! An Ortus app crate: it depends on `ortus-core` only and hands its apps
 //! to a program through [`apps`].
 
+pub mod store;
+
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use ortus_core::app::{App, AppInfo, Group};
+use ortus_core::app::{App, AppInfo, Group, JobKind};
+use ortus_core::instance::Instance;
+use ortus_core::retention::Rules;
+use ortus_core::storage::{AsyncTx, BoxFuture, Migration};
 
 /// The app's built web client (web/dist).
 #[derive(rust_embed::RustEmbed)]
@@ -28,6 +33,55 @@ impl App for Mail {
 
     fn web_file(&self, path: &str) -> Option<Cow<'static, [u8]>> {
         Web::get(path).map(|file| file.data)
+    }
+
+    fn migrations(&self) -> &'static [Migration] {
+        store::MIGRATIONS
+    }
+
+    fn jobs(&self, instance: &Arc<Instance>) -> Vec<JobKind> {
+        let instance = Arc::clone(instance);
+        vec![JobKind {
+            kind: store::DELETE_FILES_JOB.into(),
+            handler: Box::new(move |job, _tx| {
+                let instance = Arc::clone(&instance);
+                let payload = job.payload.clone();
+                Box::pin(async move {
+                    let blobs: Vec<String> =
+                        serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+                    for blob in blobs {
+                        instance
+                            .files
+                            .delete(&blob)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                })
+            }),
+        }]
+    }
+
+    fn purge<'a>(
+        &'a self,
+        tx: &'a mut dyn AsyncTx,
+        rules: &'a Rules,
+    ) -> BoxFuture<'a, Result<u64, String>> {
+        Box::pin(async move { store::purge(tx, rules).await.map_err(|e| e.to_string()) })
+    }
+
+    fn forget_user<'a>(
+        &'a self,
+        tx: &'a mut dyn AsyncTx,
+        user_id: &'a str,
+        _rules: &'a Rules,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            store::forget(tx, user_id)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
     }
 }
 
