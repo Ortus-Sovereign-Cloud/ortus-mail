@@ -119,6 +119,8 @@ const en = {
   "notAllowed": "The label of this mail does not let it go to {address}.",
   "needsReason": "Mail with this label needs a reason to go to {address}. Finish it in Compose.",
   "sendFailed": "The reply could not be sent. Try again.",
+  "messageFailed": "The message could not be sent. Try again.",
+  "cannotSendNoAddress": "You cannot send mail from here yet: your account has no address in this organisation's mail. An administrator can give you one.",
   "replySent": "Reply sent.",
   "snoozed": "Snoozed",
   "scheduled": "Scheduled",

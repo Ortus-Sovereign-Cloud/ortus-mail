@@ -18,7 +18,8 @@ test("the start page's mail card lists unread mail and leads to it", async ({ pa
     .post("/api/v1/mail/web/jmap", { headers: { "X-Requested-With": "ortus" }, data: { using: ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"], methodCalls: [["Mailbox/get", {}, "b"]] } })
     .then(async (r) => ((await r.json()).methodResponses[0][1].list as { role: string; unreadEmails: number }[]).find((b) => b.role === "inbox")!.unreadEmails);
   if (unread) {
-    await expect(card).toContainText(en.todayUnread.replace("{count}", String(unread)));
+    // Other tests read and receive mail meanwhile: the count, not its value.
+    await expect(card).toContainText(new RegExp(en.todayUnread.replace("{count}", "\\d+")));
     const first = card.getByRole("link").first();
     await expect(first).toHaveAttribute("href", /^\/mail\?thread=/);
   } else {

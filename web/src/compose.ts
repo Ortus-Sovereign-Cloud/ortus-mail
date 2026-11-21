@@ -517,6 +517,8 @@ export class OrtusMailCompose extends LitElement {
   @state() private text = "";
   @state() private attachments: Attachment[] = [];
   @state() private identities: Identity[] = [];
+  /** The person's addresses are known (none: they cannot send from here). */
+  @state() private identitiesLoaded = false;
   @state() private from = "";
   @state() private labels: { id: string; name: string }[] = [];
   @state() private label = "";
@@ -555,6 +557,7 @@ export class OrtusMailCompose extends LitElement {
     const p = new URLSearchParams(location.search);
     const [ids, labels] = await Promise.all([jmap([["Identity/get", {}, "i"]]), call<{ labels: { id: string; name: string }[] }>("GET", "/mail/labels").catch(() => ({ labels: [] }))]);
     this.identities = (ids.i!.list as Identity[]) ?? [];
+    this.identitiesLoaded = true;
     this.from = this.identities[0]?.id ?? "";
     this.labels = labels.labels;
     const draft = p.get("draft");
@@ -741,7 +744,13 @@ export class OrtusMailCompose extends LitElement {
     return new Intl.NumberFormat(lang, { style: "unit", unit, unitDisplay: "short", maximumFractionDigits: 1 }).format(value);
   }
 
+  /** No address of one's own here: nothing can be sent from this account. */
+  private addressless(): boolean {
+    return this.identitiesLoaded && !this.identities.length;
+  }
+
   private blocked(): boolean {
+    if (this.addressless()) return true;
     if (!this.to.length || this.busy || this.attachments.some((a) => !a.blobId)) return true;
     if (!this.problem.ok && this.problem.problem !== "needs_reason") return true;
     return !this.problem.ok && this.problem.problem === "needs_reason" && !this.reason.trim();
@@ -768,7 +777,7 @@ export class OrtusMailCompose extends LitElement {
       const made = (r.x!.created as Record<string, { id: string }> | undefined)?.s;
       if (!made) {
         const failed = (r.x!.notCreated as Record<string, { type: string; ortusAddress?: string; ortusNeedsReason?: boolean }>).s;
-        this.error = failed?.type === "forbiddenToSend" ? t(this.localize, failed.ortusNeedsReason ? "needsReason" : "notAllowed", { address: failed.ortusAddress ?? "" }) : t(this.localize, "sendFailed");
+        this.error = failed?.type === "forbiddenToSend" ? t(this.localize, failed.ortusNeedsReason ? "needsReason" : "notAllowed", { address: failed.ortusAddress ?? "" }) : t(this.localize, "messageFailed");
         void this.check();
         return;
       }
@@ -778,7 +787,7 @@ export class OrtusMailCompose extends LitElement {
       else toast({ text: t(this.localize, "sentTo", { count }), undo: { submission: made.id, draft: id }, seconds: UNDO_SECONDS });
       navigate("/mail");
     } catch (e) {
-      this.error = e instanceof ApiError ? e.message : t(this.localize, "sendFailed");
+      this.error = e instanceof ApiError ? e.message : t(this.localize, "messageFailed");
     } finally {
       this.busy = false;
     }
@@ -932,6 +941,7 @@ export class OrtusMailCompose extends LitElement {
           ${this.renderTimes()}
           ${this.warning()}
           ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
+          ${this.addressless() ? html`<p class="error" role="status">${t(this.localize, "cannotSendNoAddress")}</p>` : nothing}
           <div class="foot">
             <button class="primary" type="submit" ?disabled=${this.blocked()}>${t(this.localize, "send")}</button>
             <button class="secondary" type="button" ?disabled=${this.blocked()} @click=${() => this.send(tomorrow)}>${t(this.localize, "sendAt", { time: new Intl.DateTimeFormat(document.documentElement.lang || "en", { hour: "2-digit", minute: "2-digit" }).format(tomorrow) })}</button>

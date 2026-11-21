@@ -118,6 +118,8 @@ const messages: Record<MailKey, MailMessage> = {
   "notAllowed": "Etykieta tej wiadomości nie pozwala wysłać jej do {address}.",
   "needsReason": "Wiadomość z tą etykietą wymaga uzasadnienia, by trafić do {address}. Dokończ ją w edytorze.",
   "sendFailed": "Nie udało się wysłać odpowiedzi. Spróbuj ponownie.",
+  "messageFailed": "Nie udało się wysłać wiadomości. Spróbuj ponownie.",
+  "cannotSendNoAddress": "Nie możesz jeszcze stąd wysyłać poczty: Twoje konto nie ma adresu w poczcie tej organizacji. Może go nadać administrator.",
   "replySent": "Odpowiedź wysłana.",
   "snoozed": "Odłożone",
   "scheduled": "Zaplanowane",

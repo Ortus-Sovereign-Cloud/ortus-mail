@@ -118,6 +118,8 @@ const messages: Record<MailKey, MailMessage> = {
   "notAllowed": "Le libellé de ce message ne permet pas de l’envoyer à {address}.",
   "needsReason": "Un message avec ce libellé doit être justifié pour partir vers {address}. Terminez-le dans l’éditeur.",
   "sendFailed": "La réponse n’a pas pu être envoyée. Réessayez.",
+  "messageFailed": "Le message n’a pas pu être envoyé. Réessayez.",
+  "cannotSendNoAddress": "Vous ne pouvez pas encore envoyer de courriel d’ici : votre compte n’a pas d’adresse dans la messagerie de cette organisation. Un administrateur peut vous en donner une.",
   "replySent": "Réponse envoyée.",
   "snoozed": "En attente",
   "scheduled": "Programmés",

@@ -122,3 +122,17 @@ test("another app starts a message with a subject and text", async ({ page }) =>
   await expect(compose(page).getByRole("textbox", { name: en.subject })).toHaveValue("shelter-agreement.docx");
   await expect(compose(page).getByRole("textbox", { name: en.message })).toHaveValue("https://example.org/drive?file=d1");
 });
+
+test("someone with no mail address here is told so, and cannot send", async ({ page, browser }) => {
+  const email = `outside-${Date.now()}@gmail.example`;
+  const invited = await page.request.post("/api/v1/admin/users", { headers: { "X-Requested-With": "ortus" }, data: { email, name: "Petro Kovalenko" } });
+  expect(invited.status(), await invited.text()).toBe(200);
+  const link = new URL(((await invited.json()) as { link: string }).link);
+  const petro = await (await browser.newContext({ storageState: { cookies: [], origins: [] } })).newPage();
+  await petro.goto(link.pathname + link.hash);
+  await expect(petro).toHaveURL(/\/welcome$/);
+  await petro.goto("/mail/compose?to=olena%40ministry.example");
+  const compose = petro.locator("ortus-mail-compose");
+  await expect(compose.getByText(en.cannotSendNoAddress)).toBeVisible();
+  await expect(compose.getByRole("button", { name: en.send, exact: true })).toBeDisabled();
+});

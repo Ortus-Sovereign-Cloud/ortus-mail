@@ -118,6 +118,8 @@ const messages: Record<MailKey, MailMessage> = {
   "notAllowed": "Das Label dieser E-Mail erlaubt keinen Versand an {address}.",
   "needsReason": "E-Mails mit diesem Label brauchen eine Begründung für {address}. Schließen Sie sie im Editor ab.",
   "sendFailed": "Die Antwort konnte nicht gesendet werden. Bitte erneut versuchen.",
+  "messageFailed": "Die Nachricht konnte nicht gesendet werden. Versuchen Sie es erneut.",
+  "cannotSendNoAddress": "Sie können von hier noch keine E-Mails senden: Ihr Konto hat keine Adresse in der Mail dieser Organisation. Ihre Administration kann Ihnen eine geben.",
   "replySent": "Antwort gesendet.",
   "snoozed": "Zurückgestellt",
   "scheduled": "Geplant",
