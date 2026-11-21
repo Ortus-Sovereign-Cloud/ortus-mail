@@ -3,6 +3,11 @@ import type { Message } from "ortus-kit";
 // The mail app's texts in English: the keys every other catalog has.
 const en = {
   "inbox": "Inbox",
+  "todayUnread": "Unread: {count}",
+  "todayAllRead": "Your inbox is read.",
+  "todayNoSubject": "(no subject)",
+  "todayOpen": "Open Mail",
+  "todayWrite": "Write",
   "empty": "No mail yet",
   "emptyLead": "Messages to you will appear here.",
   "domains": "Domains",

@@ -2,6 +2,11 @@ import type { MailKey, MailMessage } from "./en.js";
 
 const messages: Record<MailKey, MailMessage> = {
   "inbox": "Boîte de réception",
+  "todayUnread": "Non lus : {count}",
+  "todayAllRead": "Votre boîte de réception est lue.",
+  "todayNoSubject": "(sans objet)",
+  "todayOpen": "Ouvrir Mail",
+  "todayWrite": "Écrire",
   "empty": "Pas encore de mail",
   "emptyLead": "Les messages qui vous sont adressés apparaîtront ici.",
   "domains": "Domaines",

@@ -2,6 +2,11 @@ import type { MailKey, MailMessage } from "./en.js";
 
 const messages: Record<MailKey, MailMessage> = {
   "inbox": "Вхідні",
+  "todayUnread": "Непрочитаних: {count}",
+  "todayAllRead": "Усе у вхідних прочитано.",
+  "todayNoSubject": "(без теми)",
+  "todayOpen": "Відкрити пошту",
+  "todayWrite": "Написати",
   "empty": "Пошти ще немає",
   "emptyLead": "Листи до вас з’являться тут.",
   "domains": "Домени",

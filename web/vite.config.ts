@@ -9,7 +9,8 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: false,
     target: "es2022",
-    lib: { entry: "src/app.ts", formats: ["es"], fileName: () => "app.js" },
+    // app.js: the app; today.js: its card on the start page (small, loaded on its own).
+    lib: { entry: { app: "src/app.ts", today: "src/today.ts" }, formats: ["es"], fileName: (_, name) => `${name}.js` },
     rollupOptions: {
       external: ["ortus-kit"],
       output: { paths: { "ortus-kit": "/assets/kit.js" }, chunkFileNames: "[name]-[hash].js" },

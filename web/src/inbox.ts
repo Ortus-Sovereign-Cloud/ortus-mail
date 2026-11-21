@@ -56,10 +56,6 @@ function readPlace(): Place {
   };
 }
 
-function initials(name: string): string {
-  const words = name.replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter(Boolean);
-  return ((words[0]?.[0] ?? "?") + (words.length > 1 ? (words[words.length - 1]?.[0] ?? "") : "")).toUpperCase();
-}
 
 /** A stable colour for a name (one of six). */
 function tone(text: string): string {
@@ -1185,7 +1181,7 @@ export class OrtusMailInbox extends LitElement {
           const labels = labelsOf(e);
           return html`<li>
             <button class="item ${e.keywords.$seen ? "" : "unread"}" aria-current=${this.place.thread === e.threadId ? "true" : nothing} @click=${() => (this.place.box === "drafts" ? navigate(`/mail/compose?draft=${encodeURIComponent(e.id)}`) : this.go({ thread: e.threadId }))}>
-              <span class="avatar ${tone(person)}" aria-hidden="true">${initials(person)}</span>
+              <ortus-avatar class="avatar ${tone(person)}" aria-hidden="true" .name=${person} .email=${(sent ? e.to?.[0] : e.from?.[0])?.email ?? ""}></ortus-avatar>
               <span class="from" dir="auto">${e.keywords.$seen ? nothing : html`<span class="sr">${t(this.localize, "unread")}</span>`}${person || t(this.localize, "noSender")}</span>
               <span class="time">${this.timeFor(e)}</span>
               <span class="subject" dir="auto">${e.subject || t(this.localize, "noSubject")}</span>
@@ -1249,7 +1245,7 @@ export class OrtusMailInbox extends LitElement {
     if (!this.expanded.has(m.id)) {
       return html`<article class="collapsed" @click=${() => (this.expanded = new Set([...this.expanded, m.id]))}>
         <div class="sender">
-          <span class="avatar ${tone(name)}" aria-hidden="true">${initials(name)}</span>
+          <ortus-avatar class="avatar ${tone(name)}" aria-hidden="true" .name=${name} .email=${from?.email ?? ""}></ortus-avatar>
           <span><span class="name">${name}</span><div class="preview" dir="auto">${m.preview}</div></span>
           <span class="time">${this.when(m.receivedAt)}</span>
         </div>
@@ -1259,7 +1255,7 @@ export class OrtusMailInbox extends LitElement {
     const files = (m.attachments ?? []).filter((a) => !(m.ortusInvite && (a.type ?? "").toLowerCase().startsWith("text/calendar")));
     return html`<article>
       <div class="sender">
-        <span class="avatar ${tone(name)}" aria-hidden="true">${initials(name)}</span>
+        <ortus-avatar class="avatar ${tone(name)}" aria-hidden="true" .name=${name} .email=${from?.email ?? ""}></ortus-avatar>
         <span>
           <span class="name">${name}</span> <span class="address">${from?.email ?? ""}</span>
           <div class="to">${to ? t(this.localize, "toNames", { names: to }) : nothing}${m.ortusVerified ? html` · <span class="verified">${t(this.localize, "verifiedSender")}</span>` : nothing}</div>

@@ -38,10 +38,6 @@ type Problem = { ok: true } | { ok: false; problem: "needs_reason" | "policy" | 
 
 const ADDRESS = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 
-function initials(name: string): string {
-  const words = name.replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter(Boolean);
-  return ((words[0]?.[0] ?? "?") + (words.length > 1 ? (words[words.length - 1]?.[0] ?? "") : "")).toUpperCase();
-}
 
 function tone(text: string): string {
   let h = 0;
@@ -861,7 +857,7 @@ export class OrtusMailCompose extends LitElement {
             <div class="recipients">
               ${this.to.map(
                 (p) => html`<span class="person ${p.here === false ? "outside" : ""}">
-                  <span class="mini ${tone(p.name || p.email)}" aria-hidden="true">${initials(p.name || p.email)}</span>
+                  <ortus-avatar class="mini ${tone(p.name || p.email)}" aria-hidden="true" .name=${p.name || p.email} .email=${p.email ?? ""}></ortus-avatar>
                   <span dir="auto">${p.name || p.email}</span>
                   <button type="button" aria-label=${t(this.localize, "removeRecipient", { name: p.name || p.email })} @click=${() => {
                     this.to = this.to.filter((x) => x !== p);
@@ -898,7 +894,7 @@ export class OrtusMailCompose extends LitElement {
                         e.preventDefault();
                         this.add(p);
                       }}>
-                        <span class="mini ${tone(p.name || p.email)}" aria-hidden="true">${initials(p.name || p.email)}</span>
+                        <ortus-avatar class="mini ${tone(p.name || p.email)}" aria-hidden="true" .name=${p.name || p.email} .email=${p.email ?? ""}></ortus-avatar>
                         <span dir="auto">${p.name || p.email}</span>
                         <small dir="auto">${p.email} · ${p.here ? t(this.localize, "colleague") : t(this.localize, "outside")}</small>
                       </li>`,
@@ -957,7 +953,7 @@ export class OrtusMailCompose extends LitElement {
             ${this.to.length
               ? this.to.map(
                   (p) => html`<div class="who">
-                    <span class="mini ${tone(p.name || p.email)}" aria-hidden="true">${initials(p.name || p.email)}</span>
+                    <ortus-avatar class="mini ${tone(p.name || p.email)}" aria-hidden="true" .name=${p.name || p.email} .email=${p.email ?? ""}></ortus-avatar>
                     <span><strong dir="auto">${p.name || p.email}</strong><small dir="auto">${p.here === true ? t(this.localize, "colleague") : p.here === false ? `${t(this.localize, "outside")} · ${p.email.split("@")[1] ?? ""}` : p.email}</small></span>
                   </div>`,
                 )
