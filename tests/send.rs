@@ -203,6 +203,89 @@ fn mail_goes_out_signed_and_comes_back_when_it_cannot() {
                 && bounce.contains("550"),
             "{name}: {bounce}"
         );
+        // Olena is told at once, once, and her sent copy says so.
+        let told = |key: &str| {
+            block_on(a.store.query(
+                "SELECT title, path FROM core_notifications WHERE user_id = $1 AND template LIKE $2",
+                &[olena.as_str().into(), format!("%{key}%").into()],
+            ))
+            .unwrap()
+        };
+        let not_delivered = told("mailNotDelivered");
+        assert_eq!(1, not_delivered.len(), "{name}");
+        assert!(
+            not_delivered[0]
+                .text(0)
+                .unwrap()
+                .contains("nobody@regional.example")
+                && not_delivered[0]
+                    .text(1)
+                    .unwrap()
+                    .starts_with("/mail?box=sent&thread="),
+            "{name}"
+        );
+        let lost = block_on(a.store.query(
+            "SELECT message FROM mail_outbound WHERE recipient = 'nobody@regional.example'",
+            &[],
+        ))
+        .unwrap();
+        let shown = block_on(ortus_mail::store::deliveries(
+            a.store.as_ref(),
+            &olena,
+            lost[0].text(0).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            ("bounced", true),
+            (
+                shown[0]["state"].as_str().unwrap(),
+                shown[0]["lastError"].as_str().unwrap().contains("550")
+            ),
+            "{name}: {shown:?}"
+        );
+        // Not someone else's.
+        assert!(
+            block_on(ortus_mail::store::deliveries(
+                a.store.as_ref(),
+                &sam,
+                lost[0].text(0).unwrap()
+            ))
+            .unwrap()
+            .is_empty(),
+            "{name}"
+        );
+
+        // A server that does not answer: after half an hour, she is told
+        // it is delayed (once), and it is shown as trying again.
+        dns.mx("down.example", 10, "mx.down.example.");
+        dns.a("mx.down.example", std::net::Ipv4Addr::new(127, 0, 0, 2));
+        let to = vec!["kasia@down.example".to_string()];
+        let raw = message("kasia@down.example", "delayed");
+        block_on(send::send(
+            &a,
+            &Outgoing {
+                user: &olena,
+                from: "olena@ministry.example",
+                to: &to,
+                raw: &raw,
+                label: None,
+                reason: None,
+            },
+        ))
+        .unwrap();
+        block_on(a.store.execute(
+            "UPDATE mail_outbound SET created_at = created_at - 3600000 WHERE recipient = 'kasia@down.example'",
+            &[],
+        ))
+        .unwrap();
+        run_jobs(&a);
+        let state = block_on(a.store.query(
+            "SELECT state FROM mail_outbound WHERE recipient = 'kasia@down.example'",
+            &[],
+        ))
+        .unwrap();
+        assert_eq!(Some("deferred"), state[0].text(0), "{name}");
+        assert_eq!(1, told("mailDelayed").len(), "{name}");
 
         // SECRET never leaves, and nothing is kept as sent; a mail app's
         // label header counts the same.

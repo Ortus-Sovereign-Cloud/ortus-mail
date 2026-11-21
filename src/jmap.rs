@@ -535,6 +535,7 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
                 | "ortusCategory"
                 | "ortusVerified"
                 | "ortusSnoozedUntil"
+                | "ortusDelivery"
         )
     });
     let found = stored(ctx, &ids).await?;
@@ -585,6 +586,11 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
                 "ortusInvite" => crate::invites::shown(ctx.instance, &ctx.user.id, &raw)
                     .await
                     .unwrap_or(Value::Null),
+                // How a message one sent is getting to each recipient
+                // outside (empty for mail received or sent inside).
+                "ortusDelivery" => {
+                    json!(store::deliveries(ctx.store(), &ctx.user.id, &s.id).await?)
+                }
                 "ortusSnoozedUntil" => store::snoozed_until(ctx.store(), &ctx.user.id, &s.id)
                     .await?
                     .map_or(Value::Null, |t| json!(utc(t))),

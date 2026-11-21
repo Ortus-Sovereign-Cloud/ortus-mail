@@ -3,7 +3,7 @@
 // agenda column.
 import { ApiError, LitElement, LocalizeController, call, controls, css, customElement, html, me, nothing, repeat, state, svg, type Me } from "ortus-kit";
 import { t } from "./i18n.js";
-import { LIST_PROPERTIES, MethodError, READ_PROPERTIES, jmap, labelsOf, type Email, type EmailAddress, type Invite, type Mailbox } from "./jmap.js";
+import { LIST_PROPERTIES, MethodError, READ_PROPERTIES, deliveryState, jmap, labelsOf, type Email, type EmailAddress, type Invite, type Mailbox } from "./jmap.js";
 import type { MailKey } from "./locales/en.js";
 import { calendarInstalled, driveInstalled, navigate, toast } from "./events.js";
 
@@ -362,6 +362,23 @@ export class OrtusMailInbox extends LitElement {
         font-weight: 600;
         white-space: nowrap;
       }
+      .chip.failed { background: #3a1c22; color: var(--ortus-red); }
+      .chip.trying { background: #3a2a1c; color: var(--ortus-orange); }
+      .delivery {
+        margin-top: 16px;
+        padding: 12px 16px;
+        border: 1px solid var(--ortus-line);
+        border-radius: 12px;
+        display: grid;
+        gap: 8px;
+        font-size: 14px;
+      }
+      .delivery p { margin: 0; display: flex; gap: 8px; }
+      .delivery small { display: block; color: var(--ortus-text-3); }
+      .delivery .sent span:first-child { color: var(--ortus-teal); }
+      .delivery .bounced { color: var(--ortus-red); }
+      .delivery .deferred span:first-child, .delivery .queued span:first-child { color: var(--ortus-orange); }
+      .delivery .again { justify-self: start; }
       .chip.tone0 { background: #3a2a1c; color: var(--ortus-orange); }
       .chip.tone1 { background: #252a35; color: var(--ortus-text-2); }
       .chip.tone2 { background: #232a4d; color: var(--ortus-accent); }
@@ -1185,7 +1202,7 @@ export class OrtusMailInbox extends LitElement {
               <span class="from" dir="auto">${e.keywords.$seen ? nothing : html`<span class="sr">${t(this.localize, "unread")}</span>`}${person || t(this.localize, "noSender")}</span>
               <span class="time">${this.timeFor(e)}</span>
               <span class="subject" dir="auto">${e.subject || t(this.localize, "noSubject")}</span>
-              <span>${waiting(e.ortusInvite) ? html`<span class="chip invite">${t(this.localize, "invite")}</span>` : labels[0] ? html`<span class="chip ${tone(labels[0])}">${this.label(labels[0])}</span>` : nothing}</span>
+              <span>${sent && deliveryState(e.ortusDelivery) ? html`<span class="chip ${deliveryState(e.ortusDelivery)}">${t(this.localize, deliveryState(e.ortusDelivery) === "failed" ? "deliveryFailedShort" : "deliveryTryingShort")}</span>` : waiting(e.ortusInvite) ? html`<span class="chip invite">${t(this.localize, "invite")}</span>` : labels[0] ? html`<span class="chip ${tone(labels[0])}">${this.label(labels[0])}</span>` : nothing}</span>
             </button>
           </li>`;
         },
@@ -1264,6 +1281,7 @@ export class OrtusMailInbox extends LitElement {
       </div>
       <p class="body" dir="auto">${m.ortusText ?? m.preview}</p>
       ${m.ortusInvite ? this.inviteCard(m, m.ortusInvite) : nothing}
+      ${m.ortusDelivery?.length ? this.delivery(m) : nothing}
       ${files.length
         ? html`<div class="files">
             ${files.map((a) => {
@@ -1281,6 +1299,27 @@ export class OrtusMailInbox extends LitElement {
           </div>`
         : nothing}
     </article>`;
+  }
+
+  /** How a message one sent is getting to each recipient outside. */
+  private delivery(m: Email) {
+    const list = m.ortusDelivery ?? [];
+    const failed = list.some((d) => d.state === "bounced");
+    const again = () => {
+      const to = list.filter((d) => d.state === "bounced").map((d) => d.recipient)[0] ?? "";
+      const p = new URLSearchParams({ to, subject: m.subject ?? "", text: m.ortusText ?? m.preview ?? "" });
+      navigate(`/mail/compose?${p}`);
+    };
+    return html`<div class="delivery" role="status" aria-label=${t(this.localize, "deliveryTitle")}>
+      ${list.map((d) => {
+        const key = d.state === "sent" ? "deliveryDone" : d.state === "bounced" ? "deliveryFailed" : d.state === "deferred" ? "deliveryTrying" : "deliveryQueued";
+        return html`<p class=${d.state}>
+          <span aria-hidden="true">${d.state === "sent" ? "✓" : d.state === "bounced" ? "✕" : "·"}</span>
+          <span>${t(this.localize, key, { to: d.recipient, tries: String(d.attempts) })}${d.lastError && d.state !== "sent" ? html`<small dir="auto">${d.lastError}</small>` : nothing}</span>
+        </p>`;
+      })}
+      ${failed ? html`<button class="again" @click=${again}>${t(this.localize, "deliveryAgain")}</button>` : nothing}
+    </div>`;
   }
 
   /** The invitation in a message: when, whether one is free, the answer. */

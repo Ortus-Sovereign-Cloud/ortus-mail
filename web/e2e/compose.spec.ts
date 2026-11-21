@@ -99,6 +99,26 @@ test.describe("flows", () => {
     await expect(inbox(page).getByRole("button", { name: /River Authority/ })).toBeVisible();
   });
 
+  test("a sent message shows how its delivery goes, and Sent marks it", async ({ page }) => {
+    await page.goto("/mail/compose");
+    await compose(page).getByRole("combobox", { name: en.to }).fill("kasia@nowhere.example");
+    await compose(page).getByRole("combobox", { name: en.to }).press("Enter");
+    await compose(page).getByRole("textbox", { name: en.subject }).fill("Delivery check");
+    await compose(page).getByRole("textbox", { name: en.message }).fill("Does this reach you?");
+    await compose(page).getByRole("button", { name: en.send, exact: true }).click();
+    await expect(page.locator("ortus-mail-app").getByRole("status").filter({ hasText: "Sent to 1 person" })).toBeVisible();
+    // nowhere.example has no mail servers: Ortus keeps trying, and says so.
+    await expect(async () => {
+      await page.goto("/mail?box=sent");
+      const row = inbox(page).getByRole("button", { name: /Delivery check/ });
+      await expect(row).toContainText(en.deliveryTryingShort, { timeout: 2000 });
+      await row.click();
+      const delivery = inbox(page).getByRole("region", { name: "Delivery check" }).getByRole("status", { name: en.deliveryTitle });
+      await expect(delivery).toContainText(en.deliveryTrying.replace("{to}", "kasia@nowhere.example").split(";")[0]!, { timeout: 2000 });
+      await expect(delivery).toContainText("no address for the mail servers of nowhere.example");
+    }).toPass({ timeout: 60_000 });
+  });
+
   test("a draft opens in Compose from Drafts", async ({ page }) => {
     await page.goto("/mail?box=drafts");
     await inbox(page).getByRole("button", { name: /Briefing notes/ }).click();

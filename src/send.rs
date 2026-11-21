@@ -483,12 +483,14 @@ async fn exchangers(domain: &str) -> Result<Vec<(String, IpAddr)>, String> {
     let mut refused_inside = false;
     for (_, host) in hosts {
         if let Ok(ips) = resolver.lookup_ip(format!("{host}.")).await {
+            let all: Vec<IpAddr> = ips.iter().collect();
             // Never into our own network: a domain whose MX points at a
             // private address would make us talk to servers there.
-            match ips.iter().find(|ip| inside_allowed || public(*ip)) {
-                Some(ip) => out.push((host, ip)),
-                None => refused_inside |= ips.iter().next().is_some(),
+            let usable = addresses_to_try(&all, inside_allowed);
+            if usable.is_empty() {
+                refused_inside |= !all.is_empty();
             }
+            out.extend(usable.into_iter().map(|ip| (host.clone(), ip)));
         }
     }
     if out.is_empty() {
@@ -499,6 +501,21 @@ async fn exchangers(domain: &str) -> Result<Vec<(String, IpAddr)>, String> {
         });
     }
     Ok(out)
+}
+
+/// A mail server's addresses to try, in order: every public one (every one
+/// when `inside_allowed`), IPv4 first. A server without IPv6 (many have
+/// none) would otherwise fail on the first IPv6 address with "network
+/// unreachable" and never reach the server by IPv4.
+pub fn addresses_to_try(ips: &[IpAddr], inside_allowed: bool) -> Vec<IpAddr> {
+    let mut usable: Vec<IpAddr> = ips
+        .iter()
+        .copied()
+        .filter(|ip| inside_allowed || public(*ip))
+        .collect();
+    usable.sort_by_key(|ip| ip.is_ipv6());
+    usable.dedup();
+    usable
 }
 
 /// Whether an address is on the public internet (not loopback, private,
@@ -639,6 +656,73 @@ async fn record_at(
     }
 }
 
+/// How long a delivery may wait before its sender is told it is delayed.
+const TELL_DELAY_MS: i64 = 30 * 60 * 1000;
+
+/// Tells the sender, once per message, that its delivery to this domain is
+/// delayed ("delayed", after a while) or failed for good ("bounced").
+async fn tell(instance: &Instance, delivery: &Delivery, what: &str, error: &str) {
+    let s = instance.store.as_ref();
+    let rows = s
+        .query(
+            "SELECT MIN(created_at), MAX(CASE WHEN told = $3 OR told = 'bounced' THEN 1 ELSE 0 END) FROM mail_outbound WHERE user_id = $1 AND message = $2",
+            &[delivery.user.as_str().into(), delivery.message.as_str().into(), what.into()],
+        )
+        .await;
+    let Ok(rows) = rows else { return };
+    let Some(row) = rows.first() else { return };
+    let (since, told) = (row.int(0).unwrap_or(now()), row.int(1).unwrap_or(0) == 1);
+    if told || (what == "delayed" && now() - since < TELL_DELAY_MS) {
+        return;
+    }
+    let _ = s
+        .execute(
+            "UPDATE mail_outbound SET told = $3 WHERE user_id = $1 AND message = $2",
+            &[
+                delivery.user.as_str().into(),
+                delivery.message.as_str().into(),
+                what.into(),
+            ],
+        )
+        .await;
+    let thread = s
+        .query(
+            "SELECT thread_id FROM mail_messages WHERE id = $1",
+            &[delivery.message.as_str().into()],
+        )
+        .await
+        .ok()
+        .and_then(|r| r.first().and_then(|r| r.text(0)).map(str::to_string))
+        .unwrap_or_default();
+    let to = delivery.to.join(", ");
+    let (key, title) = if what == "bounced" {
+        (
+            "mailNotDelivered",
+            format!("Your message to {to} was not delivered"),
+        )
+    } else {
+        (
+            "mailDelayed",
+            format!("Your message to {to} is delayed; Ortus keeps trying"),
+        )
+    };
+    let path = format!("/mail?box=sent&thread={thread}");
+    let _ = ortus_core::notify::add(
+        s,
+        &delivery.user,
+        &ortus_core::notify::Notice {
+            app: "mail",
+            kind: ortus_core::notify::Kind::Alert,
+            title: &title,
+            detail: &error.chars().take(140).collect::<String>(),
+            path: &path,
+            key: Some(key),
+            args: json!({ "to": to }),
+        },
+    )
+    .await;
+}
+
 /// The job: delivers one message to one remote domain.
 pub async fn deliver(instance: Arc<Instance>, job: &Job) -> Result<(), String> {
     let delivery: Delivery = serde_json::from_str(&job.payload).map_err(|e| e.to_string())?;
@@ -661,11 +745,13 @@ pub async fn deliver(instance: Arc<Instance>, job: &Job) -> Result<(), String> {
         Ok(servers) => servers,
         Err(e) if last_try => {
             record(&instance, &delivery, "bounced", Some(&e)).await;
+            tell(&instance, &delivery, "bounced", &e).await;
             bounce(&instance, &delivery, &e).await;
             return Ok(());
         }
         Err(e) => {
             record(&instance, &delivery, "deferred", Some(&e)).await;
+            tell(&instance, &delivery, "delayed", &e).await;
             return Err(e);
         }
     };
@@ -679,6 +765,7 @@ pub async fn deliver(instance: Arc<Instance>, job: &Job) -> Result<(), String> {
             }
             Outcome::Permanent(e) => {
                 record_at(&instance, &delivery, "bounced", Some(&e), Some(&host)).await;
+                tell(&instance, &delivery, "bounced", &e).await;
                 bounce(&instance, &delivery, &e).await;
                 return Ok(());
             }
@@ -687,6 +774,7 @@ pub async fn deliver(instance: Arc<Instance>, job: &Job) -> Result<(), String> {
     }
     if last_try {
         record(&instance, &delivery, "bounced", Some(&last_error)).await;
+        tell(&instance, &delivery, "bounced", &last_error).await;
         bounce(
             &instance,
             &delivery,
@@ -696,6 +784,7 @@ pub async fn deliver(instance: Arc<Instance>, job: &Job) -> Result<(), String> {
         return Ok(());
     }
     record(&instance, &delivery, "deferred", Some(&last_error)).await;
+    tell(&instance, &delivery, "delayed", &last_error).await;
     Err(last_error)
 }
 
@@ -717,5 +806,43 @@ mod from_tests {
             b"From: a@x.example, b@y.example\r\nSubject: x\r\n\r\nHi\r\n"
         ));
         assert!(!single_from(b"Subject: x\r\n\r\nHi\r\n"));
+    }
+}
+
+#[cfg(test)]
+mod address_tests {
+    use std::net::IpAddr;
+
+    #[test]
+    fn every_public_address_is_tried_ipv4_first() {
+        let ips: Vec<IpAddr> = [
+            "2a00:1450:4013:c00::1b",
+            "142.250.27.26",
+            "10.0.0.5",
+            "2a00:1450:4013:c00::1a",
+            "142.250.27.27",
+        ]
+        .iter()
+        .map(|a| a.parse().unwrap())
+        .collect();
+        let order: Vec<String> = super::addresses_to_try(&ips, false)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            vec![
+                "142.250.27.26",
+                "142.250.27.27",
+                "2a00:1450:4013:c00::1b",
+                "2a00:1450:4013:c00::1a"
+            ],
+            order,
+            "IPv4 first, then IPv6; never the private one"
+        );
+        assert_eq!(
+            5,
+            super::addresses_to_try(&ips, true).len(),
+            "inside allowed (tests): all"
+        );
     }
 }

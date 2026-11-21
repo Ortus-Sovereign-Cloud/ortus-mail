@@ -211,7 +211,40 @@ pub const MIGRATIONS: &[Migration] = &[
         previous_at BIGINT NOT NULL
     )",
     },
+    // What the sender was told of a delivery ("delayed", "bounced"), so
+    // each is told once.
+    Migration {
+        version: 10,
+        name: "delivery notices",
+        sql: "ALTER TABLE mail_outbound ADD COLUMN told TEXT",
+    },
 ];
+
+/// How each recipient of a message one sent is getting it: state (queued,
+/// deferred, sent, bounced), tries, the last error, when it last changed.
+pub async fn deliveries(
+    store: &dyn AsyncStore,
+    user: &str,
+    message: &str,
+) -> StoreResult<Vec<serde_json::Value>> {
+    Ok(store
+        .query(
+            "SELECT recipient, state, attempts, last_error, updated_at FROM mail_outbound WHERE user_id = $1 AND message = $2 ORDER BY recipient",
+            &[user.into(), message.into()],
+        )
+        .await?
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "recipient": r.text(0),
+                "state": r.text(1),
+                "attempts": r.int(2),
+                "lastError": r.text(3),
+                "updatedAt": r.int(4),
+            })
+        })
+        .collect())
+}
 
 /// The mailboxes everyone has, by role, with their IMAP names.
 pub const DEFAULT_MAILBOXES: [(&str, &str); 6] = [

@@ -69,6 +69,25 @@ export interface Email {
   ortusCategory?: string;
   ortusSnoozedUntil?: string | null;
   ortusInvite?: Invite | null;
+  ortusDelivery?: Delivery[];
+}
+
+/** How a message one sent is getting to one recipient outside. */
+export interface Delivery {
+  recipient: string;
+  /** queued, deferred (trying again), sent (delivered) or bounced. */
+  state: "queued" | "deferred" | "sent" | "bounced";
+  attempts: number;
+  lastError: string | null;
+  updatedAt: number;
+}
+
+/** The worst state among a message's deliveries, for a marker. */
+export function deliveryState(d: Delivery[] | undefined): "failed" | "trying" | null {
+  if (!d?.length) return null;
+  if (d.some((x) => x.state === "bounced")) return "failed";
+  if (d.some((x) => x.state === "deferred")) return "trying";
+  return null;
 }
 
 /** A message's invitation, as the person's calendar has it. */
@@ -88,7 +107,7 @@ export interface Invite {
   replied: string | null;
 }
 
-export const LIST_PROPERTIES = ["threadId", "subject", "from", "to", "receivedAt", "preview", "keywords", "mailboxIds", "hasAttachment", "ortusCategory", "ortusInvite"];
+export const LIST_PROPERTIES = ["threadId", "subject", "from", "to", "receivedAt", "preview", "keywords", "mailboxIds", "hasAttachment", "ortusCategory", "ortusInvite", "ortusDelivery"];
 export const READ_PROPERTIES = [...LIST_PROPERTIES, "cc", "replyTo", "messageId", "references", "attachments", "ortusText", "ortusVerified", "ortusSnoozedUntil"];
 
 /** Labels are keywords of one's own (not the `$` system ones). */
