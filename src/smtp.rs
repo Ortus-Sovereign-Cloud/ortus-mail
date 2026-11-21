@@ -6,7 +6,10 @@
 //!
 //! Settings (environment): `ORTUS_SMTP_LISTEN` (default `0.0.0.0:25`),
 //! `ORTUS_MAIL_TLS_CERT` and `ORTUS_MAIL_TLS_KEY` (PEM files; STARTTLS is
-//! offered when both are set), `ORTUS_MAIL_MAX_SIZE` (bytes, default 25 MB).
+//! offered when both are set), `ORTUS_MAIL_MAX_SIZE` (bytes, default 25 MB),
+//! `ORTUS_SMTP_TRUSTED_RELAYS` (addresses, comma separated: a mail server
+//! in front of this one, such as Postfix on the same machine, that names
+//! the real sender with XFORWARD; SPF and the Received line use that).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -71,6 +74,50 @@ impl Drop for Slot {
             }
         }
     }
+}
+
+/// Whether `ip` is a mail server in front of this one, trusted to name the
+/// real sender (XFORWARD).
+fn trusted_relay(ip: IpAddr) -> bool {
+    std::env::var("ORTUS_SMTP_TRUSTED_RELAYS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|a| a.trim().parse::<IpAddr>().ok())
+        .any(|a| a == ip)
+}
+
+/// The sender's address and greeting as a trusted relay names them
+/// (Postfix's XFORWARD: `ADDR=203.0.113.5 HELO=mail.example ...`; values it
+/// does not know are `[UNAVAILABLE]`).
+fn xforward(argument: &str, into: &mut Forwarded) -> bool {
+    for pair in argument.split_whitespace() {
+        let Some((name, value)) = pair.split_once('=') else {
+            return false;
+        };
+        if value.starts_with('[') {
+            continue;
+        }
+        match name.to_ascii_uppercase().as_str() {
+            "ADDR" => {
+                let value = value.strip_prefix_ci("IPV6:").unwrap_or(value);
+                match value.parse() {
+                    Ok(ip) => into.ip = Some(ip),
+                    Err(_) => return false,
+                }
+            }
+            "HELO" => into.helo = Some(value.to_string()),
+            "NAME" | "PROTO" | "SOURCE" | "IDENT" | "PORT" => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// What a trusted relay said of the message's real sender.
+#[derive(Default)]
+struct Forwarded {
+    ip: Option<IpAddr>,
+    helo: Option<String>,
 }
 
 pub fn max_size() -> usize {
@@ -243,6 +290,8 @@ struct Session {
     from: Option<String>,
     /// (address, user id)
     to: Vec<(String, String)>,
+    /// The real sender, when a trusted relay in front of us names it.
+    forwarded: Forwarded,
 }
 
 /// The address inside `<...>` of a MAIL or RCPT argument, and the rest.
@@ -286,12 +335,14 @@ impl Session {
             helo: None,
             from: None,
             to: Vec::new(),
+            forwarded: Forwarded::default(),
         }
     }
 
     fn reset(&mut self) {
         self.from = None;
         self.to.clear();
+        self.forwarded = Forwarded::default();
     }
 
     async fn run(
@@ -356,6 +407,9 @@ impl Session {
                         if self.tls_offered && !self.secure {
                             lines.push("250-STARTTLS".into());
                         }
+                        if matches!(self.mode, Mode::Receive) && trusted_relay(self.peer.ip()) {
+                            lines.push("250-XFORWARD NAME ADDR PROTO HELO".into());
+                        }
                         // Passwords only over TLS.
                         if matches!(self.mode, Mode::Submission { .. }) && self.secure {
                             lines.push("250-AUTH PLAIN LOGIN".into());
@@ -384,6 +438,17 @@ impl Session {
                     self.user = None;
                     self.reset();
                     continue;
+                }
+                "XFORWARD"
+                    if matches!(self.mode, Mode::Receive) && trusted_relay(self.peer.ip()) =>
+                {
+                    if self.from.is_some() {
+                        "503 5.5.1 XFORWARD before MAIL\r\n".into()
+                    } else if xforward(argument, &mut self.forwarded) {
+                        "250 2.0.0 OK\r\n".into()
+                    } else {
+                        "501 5.5.4 XFORWARD name=value ...\r\n".into()
+                    }
                 }
                 "AUTH" => self.auth(argument, &mut reader).await?,
                 "MAIL" => self.mail(argument),
@@ -629,9 +694,15 @@ impl Session {
 
     /// Checks and delivers one message; answers the reply line.
     async fn receive(&mut self, message: Vec<u8>) -> String {
-        let ip: IpAddr = self.peer.ip();
+        // Behind a trusted relay, the sender it names.
+        let ip: IpAddr = self.forwarded.ip.unwrap_or(self.peer.ip());
         let from = self.from.clone().unwrap_or_default();
-        let helo = self.helo.clone().unwrap_or_default();
+        let helo = self
+            .forwarded
+            .helo
+            .clone()
+            .or_else(|| self.helo.clone())
+            .unwrap_or_default();
         let Some(parsed) = AuthenticatedMessage::parse(&message) else {
             return "554 5.6.0 That is not a message\r\n".into();
         };

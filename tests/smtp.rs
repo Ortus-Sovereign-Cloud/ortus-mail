@@ -389,3 +389,86 @@ fn the_spam_filter_files_junk_and_learns_from_corrections() {
         "trusted now"
     );
 }
+
+#[test]
+fn a_trusted_relay_in_front_names_the_real_sender() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dns = Dns::start();
+    unsafe {
+        std::env::set_var("ORTUS_DNS_SERVERS", dns.addr.to_string());
+        std::env::set_var("ORTUS_MAIL_HOSTNAME", "mail.ministry.example");
+        std::env::remove_var("ORTUS_SMTP_TRUSTED_RELAYS");
+    }
+    // relayed.example sends from 203.0.113.5 only, unsigned, and asks
+    // receivers to reject what fails.
+    dns.txt("relayed.example", &["v=spf1 ip4:203.0.113.5 -all"]);
+    dns.txt("_dmarc.relayed.example", &["v=DMARC1; p=reject"]);
+    let (_, instance, _keep) = common::installations().remove(0);
+    signed_in(&instance, "olena@ministry.example", Role::Member);
+    let olena = block_on(ortus_core::auth::accounts::by_email(
+        instance.store.as_ref(),
+        "olena@ministry.example",
+    ))
+    .unwrap()
+    .unwrap()
+    .id;
+    block_on(ortus_mail::domains::add(&instance, "ministry.example")).unwrap();
+    let listener = block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await }).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (_stop_tx, mut stop) = tokio::sync::watch::channel(false);
+    let server = Arc::clone(&instance);
+    ortus_core::runtime::io().spawn(async move {
+        ortus_mail::smtp::serve(server, listener, &mut stop)
+            .await
+            .unwrap();
+    });
+    let send = |c: &mut Client, subject: &str| {
+        assert!(c
+            .send("MAIL FROM:<anna@relayed.example>")
+            .starts_with("250"));
+        assert!(c
+            .send("RCPT TO:<olena@ministry.example>")
+            .starts_with("250"));
+        c.data(&message("anna@relayed.example", subject))
+    };
+
+    // Not trusted: no XFORWARD, and 127.0.0.1 fails SPF; rejected.
+    let mut c = Client::connect(port);
+    c.writer.write_all(b"EHLO relay.local\r\n").unwrap();
+    assert!(!c.reply_lines().iter().any(|l| l.contains("XFORWARD")));
+    assert!(c.send("XFORWARD ADDR=203.0.113.5").starts_with("502"));
+    assert!(send(&mut c, "unrelayed").starts_with("550 5.7.1"));
+    assert!(c.send("QUIT").starts_with("221"));
+
+    // Trusted: the relay names the sender, which SPF allows.
+    unsafe { std::env::set_var("ORTUS_SMTP_TRUSTED_RELAYS", "192.0.2.9, 127.0.0.1") };
+    let mut c = Client::connect(port);
+    c.writer.write_all(b"EHLO relay.local\r\n").unwrap();
+    assert!(c
+        .reply_lines()
+        .iter()
+        .any(|l| l == "250-XFORWARD NAME ADDR PROTO HELO"));
+    assert!(c
+        .send("XFORWARD NAME=mx.relayed.example ADDR=203.0.113.5")
+        .starts_with("250"));
+    assert!(c
+        .send("XFORWARD PROTO=ESMTP HELO=mx.relayed.example")
+        .starts_with("250"));
+    let reply = send(&mut c, "relayed");
+    assert!(reply.starts_with("250"), "{reply}");
+    let raw = last_raw(&instance, &olena, "inbox").unwrap();
+    assert!(
+        raw.contains("Received: from mx.relayed.example (203.0.113.5)"),
+        "{raw}"
+    );
+    assert!(
+        raw.contains("spf=pass") && raw.contains("dmarc=pass"),
+        "{raw}"
+    );
+
+    // Forgotten after each message: the next one is the relay's own again.
+    assert!(send(&mut c, "after").starts_with("550 5.7.1"));
+    assert!(c.send("XFORWARD ADDR=not-an-address").starts_with("501"));
+    assert!(c.send("QUIT").starts_with("221"));
+    unsafe { std::env::remove_var("ORTUS_SMTP_TRUSTED_RELAYS") };
+}
