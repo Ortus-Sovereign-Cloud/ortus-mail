@@ -112,6 +112,11 @@ impl App for Mail {
             instance: Arc::downgrade(instance),
         });
         services.provide("mail", mailer);
+        // The admin console asks whether an invited address is a mailbox here.
+        let domains: Arc<dyn ortus_core::interfaces::MailDomains> = Arc::new(OurDomains {
+            instance: Arc::downgrade(instance),
+        });
+        services.provide("mail", domains);
     }
 
     fn sealed(&self) -> Vec<ortus_core::secrets::Place> {
@@ -310,4 +315,22 @@ impl App for Mail {
 /// The apps of this crate, for a program to run.
 pub fn apps() -> Vec<Arc<dyn App>> {
     vec![Arc::new(Mail)]
+}
+
+/// This installation's mail domains, for the admin console's invitations.
+struct OurDomains {
+    instance: std::sync::Weak<Instance>,
+}
+
+impl ortus_core::interfaces::MailDomains for OurDomains {
+    fn is_ours<'a>(&'a self, domain: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            let Some(instance) = self.instance.upgrade() else {
+                return false;
+            };
+            store::is_our_domain(instance.store.as_ref(), domain)
+                .await
+                .unwrap_or(false)
+        })
+    }
 }

@@ -251,3 +251,23 @@ fn domains_are_added_checked_and_fixed() {
         );
     }
 }
+
+#[test]
+fn the_admin_console_learns_which_addresses_are_mailboxes_here() {
+    for (name, instance, _dir) in common::installations() {
+        let domain = format!("ours-{}.example", name.replace('+', "-"));
+        ortus_core::runtime::block_on(ortus_mail::domains::add(&instance, &domain)).unwrap();
+        let ours = ortus_core::runtime::block_on(
+            instance.service::<dyn ortus_core::interfaces::MailDomains>(),
+        )
+        .expect("the mail app provides MailDomains");
+        assert!(
+            ortus_core::runtime::block_on(ours.is_ours(&domain)),
+            "{name}"
+        );
+        assert!(
+            !ortus_core::runtime::block_on(ours.is_ours("elsewhere.example")),
+            "{name}"
+        );
+    }
+}
