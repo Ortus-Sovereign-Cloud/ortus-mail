@@ -419,3 +419,120 @@ fn mailboxes_come_over_from_the_old_server() {
         );
     }
 }
+
+/// The old server is of another make: Dovecot (ci/outside-imap.sh, which
+/// prints ORTUS_TEST_DOVECOT and ORTUS_TEST_DOVECOT_CA; CI requires it).
+#[test]
+fn mailboxes_come_over_from_a_dovecot_server() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (Ok(address), Ok(ca)) = (
+        std::env::var("ORTUS_TEST_DOVECOT"),
+        std::env::var("ORTUS_TEST_DOVECOT_CA"),
+    ) else {
+        assert!(
+            std::env::var("CI").is_err(),
+            "CI runs this against Dovecot: ci/outside-imap.sh"
+        );
+        eprintln!("no Dovecot (ci/outside-imap.sh); skipped");
+        return;
+    };
+    let (host, port) = address.rsplit_once(':').unwrap();
+    let port: u16 = port.parse().unwrap();
+    unsafe { std::env::set_var("ORTUS_IMPORT_CA", &ca) };
+    for (name, instance, _keep) in common::installations() {
+        let admin = signed_in(&instance, "taras@ministry.example", Role::Owner);
+        signed_in(&instance, "olena@ministry.example", Role::Member);
+        signed_in(&instance, "marek@ministry.example", Role::Member);
+        let id = |email: &str| {
+            block_on(ortus_core::auth::accounts::by_email(
+                instance.store.as_ref(),
+                email,
+            ))
+            .unwrap()
+            .unwrap()
+            .id
+        };
+        let (olena, marek) = (id("olena@ministry.example"), id("marek@ministry.example"));
+        let client = TestClient::new(ortus_core::app(Arc::clone(&instance)));
+        let started = client
+            .post("/api/v1/mail/admin/imports")
+            .header("Authorization", &format!("Bearer {admin}"))
+            .header("X-Requested-With", "ortus")
+            .body_text(
+                &json!({"host": host, "port": port, "security": "tls", "accounts": [
+                    {"login": "olena@old.example", "password": "old-server-pass-2026", "to": "olena@ministry.example"},
+                    {"login": "marek@old.example", "password": "old-server-pass-2026", "to": "marek@ministry.example"},
+                ]})
+                .to_string(),
+            )
+            .send();
+        assert_eq!(200, started.status(), "{name}: {}", started.body_text());
+        run_queued(&instance);
+
+        let mine = |user: &str| block_on(store::mailboxes(instance.store.as_ref(), user)).unwrap();
+        let entries = |mailbox: &str| {
+            block_on(store::entries(instance.store.as_ref(), mailbox, 0, 100)).unwrap()
+        };
+        let by_role = |user: &str, r: &str| {
+            mine(user)
+                .into_iter()
+                .find(|m| m.role.as_deref() == Some(r))
+                .unwrap()
+                .id
+        };
+        let inbox = entries(&by_role(&olena, "inbox"));
+        assert_eq!(2, inbox.len(), "{name}: {inbox:?}");
+        let gauge = inbox.iter().find(|e| e.subject == "Gauge report").unwrap();
+        assert!(
+            gauge.flags.contains(&"\\Seen".to_string())
+                && gauge.flags.contains(&"flood".to_string()),
+            "{name}: Dovecot's flags and keyword come along: {:?}",
+            gauge.flags
+        );
+        let shelter = inbox
+            .iter()
+            .find(|e| e.subject == "Shelter agreement")
+            .unwrap();
+        assert!(
+            !shelter.flags.contains(&"\\Seen".to_string()),
+            "{name}: unread stays unread"
+        );
+        let sent = entries(&by_role(&olena, "sent"));
+        assert_eq!(
+            1,
+            sent.len(),
+            "{name}: Dovecot's Sent (\\Sent) maps to Sent"
+        );
+        let projects = mine(&olena)
+            .into_iter()
+            .find(|m| m.name == "Projects/2026")
+            .unwrap_or_else(|| panic!("{name}: the nested folder: {:?}", mine(&olena)));
+        let bus = entries(&projects.id);
+        assert!(
+            bus.len() == 1 && bus[0].flags.contains(&"\\Flagged".to_string()),
+            "{name}: {bus:?}"
+        );
+        assert_eq!(
+            1,
+            entries(&by_role(&marek, "inbox")).len(),
+            "{name}: Marek's inbox"
+        );
+
+        let listed: Value = serde_json::from_str(
+            client
+                .get("/api/v1/mail/admin/imports")
+                .header("Authorization", &format!("Bearer {admin}"))
+                .send()
+                .body_text(),
+        )
+        .unwrap();
+        let accounts = listed["imports"][0]["accounts"].as_array().unwrap().clone();
+        for (login, copied) in [("olena@old.example", 4), ("marek@old.example", 1)] {
+            let row = accounts.iter().find(|a| a["login"] == login).unwrap();
+            assert!(
+                row["state"] == "done" && row["copied"] == copied,
+                "{name}: {row}"
+            );
+        }
+    }
+}
