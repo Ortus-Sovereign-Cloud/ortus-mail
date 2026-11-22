@@ -328,3 +328,55 @@ fn mail_goes_out_signed_and_comes_back_when_it_cannot() {
         assert_eq!(before, inbox(&a, &olena, "sent").len());
     }
 }
+
+#[test]
+fn mail_to_oneself_is_one_message_in_sent_and_inbox() {
+    for (name, a, _dir) in common::installations() {
+        let olena = user(&a, "olena@ministry.example");
+        let sam = user(&a, "sam@ministry.example");
+        block_on(ortus_mail::domains::add(&a, "ministry.example")).unwrap();
+        let to = vec![
+            "olena@ministry.example".to_string(),
+            "sam@ministry.example".to_string(),
+        ];
+        let raw = message(
+            "olena@ministry.example, sam@ministry.example",
+            "note-to-self",
+        );
+        let sent = block_on(send::send(
+            &a,
+            &Outgoing {
+                user: &olena,
+                from: "olena@ministry.example",
+                to: &to,
+                raw: &raw,
+                label: None,
+                reason: None,
+            },
+        ))
+        .unwrap();
+        assert_eq!(2, sent.delivered_here, "{name}");
+        // Sam has his own copy; Olena one message, in both folders.
+        assert!(
+            inbox(&a, &sam, "inbox")
+                .last()
+                .unwrap()
+                .contains("note-to-self"),
+            "{name}"
+        );
+        assert!(
+            inbox(&a, &olena, "inbox")
+                .last()
+                .unwrap()
+                .contains("note-to-self"),
+            "{name}"
+        );
+        let messages = block_on(a.store.query(
+            "SELECT CAST(COUNT(*) AS BIGINT) FROM mail_messages WHERE user_id = $1 AND subject = 'note-to-self'",
+            &[olena.as_str().into()],
+        ))
+        .unwrap()[0]
+            .int(0);
+        assert_eq!(Some(1), messages, "{name}: one message, not a second copy");
+    }
+}

@@ -357,6 +357,22 @@ pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refus
     let mut delivered_here = 0;
     let mut full: Vec<String> = Vec::new();
     for user in &here {
+        // To oneself: the same message, in the inbox too (one message,
+        // shown once in a thread), not a second copy.
+        if user.as_str() == out.user {
+            let inbox = match store::by_role(store, user, "inbox").await {
+                Ok(inbox) => inbox,
+                Err(_) => return Err(undo(stored).await),
+            };
+            if store::copy(store, &sent_box.id, copy.uid, &inbox.id)
+                .await
+                .is_err()
+            {
+                return Err(undo(stored).await);
+            }
+            delivered_here += 1;
+            continue;
+        }
         // A colleague whose mailbox is full does not get it; the sender hears.
         if !store::fits(store, user, signed.len()).await.unwrap_or(true) {
             full.push(user.clone());
