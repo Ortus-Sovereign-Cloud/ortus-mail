@@ -394,6 +394,7 @@ pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refus
         .await
         {
             Ok(delivered) => {
+                store::tell_new(instance, user, &delivered.message).await;
                 stored.push((user.clone(), delivered.message));
                 delivered_here += 1;
                 // An invitation from a colleague's mail app reaches their calendar.

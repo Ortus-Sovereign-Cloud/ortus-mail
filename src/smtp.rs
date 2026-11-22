@@ -862,7 +862,12 @@ impl Session {
             )
             .await
             {
-                Ok(delivered) => stored_for.push((user.clone(), delivered.message)),
+                Ok(delivered) => {
+                    if role == "inbox" {
+                        store::tell_new(&self.instance, user, &delivered.message).await;
+                    }
+                    stored_for.push((user.clone(), delivered.message))
+                }
                 Err(e) => {
                     eprintln!("ortus: mail: delivering to {user}: {e}");
                     not_stored = true;

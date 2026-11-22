@@ -189,6 +189,20 @@ fn mail_is_received_checked_and_delivered() {
             "{name}: {raw}"
         );
         assert!(raw.contains("\r\n.hidden line"), "dots unstuffed: {raw}");
+        // New Important mail in the Inbox is a notification (phones hear of it).
+        let notices = |olena: &str| {
+            block_on(instance.store.query(
+                "SELECT title, detail, path FROM core_notifications WHERE user_id = $1 AND app = 'mail'",
+                &[olena.into()],
+            ))
+            .unwrap()
+            .iter()
+            .map(|r| format!("{} | {} | {}", r.text(0).unwrap_or(""), r.text(1).unwrap_or(""), r.text(2).unwrap_or("")))
+            .collect::<Vec<_>>()
+        };
+        let told = notices(&olena);
+        assert_eq!(1, told.len(), "{name}: {told:?}");
+        assert!(told[0].contains("/mail?thread="), "{told:?}");
 
         // Pretending to be mail.example from elsewhere, unsigned: refused.
         assert!(c.send("MAIL FROM:<boss@spoof.example>").starts_with("250"));
@@ -209,6 +223,8 @@ fn mail_is_received_checked_and_delivered() {
         assert!(last_raw(&instance, &olena, "junk")
             .unwrap()
             .contains("Subject: quarantined"));
+        // Junk is no notification.
+        assert_eq!(1, notices(&olena).len(), "{name}");
 
         // Too big by its own word; a session that ends cleanly.
         assert!(c

@@ -1489,3 +1489,45 @@ pub async fn sweep_uploads(instance: &Instance) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// New mail in someone's Inbox that is Important (not a feed, a
+/// newsletter or junk): a notification, which their phones hear of. Its
+/// title is the sender and its detail the subject, in no language.
+pub async fn tell_new(instance: &Instance, user: &str, message: &str) {
+    let store = instance.store.as_ref();
+    let Ok(rows) = store
+        .query(
+            "SELECT thread_id, subject, from_name, from_addr, category FROM mail_messages WHERE id = $1 AND user_id = $2",
+            &[message.into(), user.into()],
+        )
+        .await
+    else {
+        return;
+    };
+    let Some(r) = rows.first() else { return };
+    if r.text(4).unwrap_or("important") != "important" {
+        return;
+    }
+    let from = r
+        .text(2)
+        .filter(|n| !n.trim().is_empty())
+        .or(r.text(3))
+        .unwrap_or_default()
+        .to_string();
+    let subject = r.text(1).unwrap_or_default().to_string();
+    let path = format!("/mail?thread={}", r.text(0).unwrap_or_default());
+    let _ = ortus_core::notify::add(
+        store,
+        user,
+        &ortus_core::notify::Notice {
+            app: "mail",
+            kind: ortus_core::notify::Kind::Update,
+            title: &from,
+            detail: &subject,
+            path: &path,
+            key: None,
+            args: serde_json::json!({}),
+        },
+    )
+    .await;
+}
