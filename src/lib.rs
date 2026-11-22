@@ -3,6 +3,7 @@
 //! An Ortus app crate: it depends on `ortus-core` only and hands its apps
 //! to a program through [`apps`].
 
+pub mod addresses;
 pub mod admin;
 pub mod catchup;
 pub mod compose;
@@ -64,6 +65,7 @@ impl App for Mail {
         all.extend(import::routes());
         all.extend(invites::routes());
         all.extend(catchup::routes());
+        all.extend(addresses::routes());
         all
     }
 
@@ -73,6 +75,11 @@ impl App for Mail {
                 path: "/admin/domains",
                 element: "ortus-mail-domains",
                 label: "domains",
+            },
+            AdminSection {
+                path: "/admin/addresses",
+                element: "ortus-mail-addresses",
+                label: "addresses",
             },
             AdminSection {
                 path: "/admin/deliverability",

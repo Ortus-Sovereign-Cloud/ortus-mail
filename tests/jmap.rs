@@ -349,6 +349,28 @@ fn apps_use_mail_over_jmap() {
                 .unwrap()
                 .len()
         );
+        // An import may say when the message arrived (a migrated archive
+        // keeps its dates); never in the future.
+        let upload = client.post(&format!("/api/v1/mail/jmap/upload/{olena}")).header("Authorization", &basic).header("Content-Type", "message/rfc822").body_text("From: x@old.example\r\nTo: olena@ministry.example\r\nSubject: Last spring\r\nMessage-ID: <spring@old.example>\r\n\r\nOld.\r\n").send();
+        let uploaded: Value = serde_json::from_str(upload.body_text()).unwrap();
+        let r = jmap(json!([["Email/import", {"emails": {
+                "old": {"blobId": uploaded["blobId"], "mailboxIds": {&archive: true}, "receivedAt": "2026-03-14T09:30:00Z"},
+                "later": {"blobId": uploaded["blobId"], "mailboxIds": {&archive: true}, "receivedAt": "2999-01-01T00:00:00Z"}
+            }}, "0"]]));
+        let old = r[0][1]["created"]["old"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            "invalidProperties", r[0][1]["notCreated"]["later"]["type"],
+            "{name}: {}",
+            r[0]
+        );
+        let got = jmap(json!([["Email/get", {"ids": [old], "properties": ["receivedAt"]}, "0"]]));
+        assert_eq!(
+            "2026-03-14T09:30:00Z", got[0][1]["list"][0]["receivedAt"],
+            "{name}"
+        );
 
         // Folders of one's own.
         let r = jmap(

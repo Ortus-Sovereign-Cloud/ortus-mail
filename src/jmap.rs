@@ -1450,7 +1450,29 @@ async fn email_import(
             if MessageParser::default().parse(&raw).is_none() {
                 return Err(json!({"type": "invalidEmail"}));
             }
+            // When it arrived, if the import says (RFC 8621: a migrated
+            // archive keeps its dates); never in the future.
+            let received_at = match value.get("receivedAt") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(
+                    v.as_str()
+                        .and_then(parse_utc)
+                        .filter(|t| *t <= ortus_core::program::now_ms())
+                        .ok_or_else(
+                            || json!({"type": "invalidProperties", "properties": ["receivedAt"]}),
+                        )?,
+                ),
+            };
             let (id, thread) = store_new(ctx, &raw, &mailboxes, &keywords).await?;
+            if let Some(at) = received_at {
+                ctx.store()
+                    .execute(
+                        "UPDATE mail_messages SET received_at = $1 WHERE id = $2 AND user_id = $3",
+                        &[at.into(), id.as_str().into(), ctx.user.id.as_str().into()],
+                    )
+                    .await
+                    .map_err(|_| json!({"type": "serverFail"}))?;
+            }
             if let Some(path) = upload_path(&ctx.user.id, blob) {
                 let _ = store::drop_upload(ctx.instance, &path).await;
             }

@@ -1,6 +1,7 @@
 // The mail app's client: the element the shell shows at /mail. It shows
 // the inbox or Compose by address, and the toast both can raise.
 import { LitElement, LocalizeController, css, customElement, html, nothing, state } from "ortus-kit";
+import "./addresses.js";
 import "./compose.js";
 import "./deliverability.js";
 import "./domains.js";
