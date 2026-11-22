@@ -109,6 +109,32 @@ fn compose_sends_later_undoes_attaches_and_snoozes() {
             "{name}: {people}"
         );
         assert_eq!(true, people["people"][0]["here"], "{name}: {people}");
+        // Someone invited (not yet joined) is suggested: new colleagues can
+        // be written to before their first day; someone suspended is not.
+        signed_in(&instance, "iryna@ministry.example", Role::Member);
+        signed_in(&instance, "petro@ministry.example", Role::Member);
+        block_on(instance.store.execute(
+            "UPDATE core_users SET state = 'invited' WHERE email = 'iryna@ministry.example'",
+            &[],
+        ))
+        .unwrap();
+        block_on(instance.store.execute(
+            "UPDATE core_users SET state = 'suspended' WHERE email = 'petro@ministry.example'",
+            &[],
+        ))
+        .unwrap();
+        assert!(
+            get("/api/v1/mail/people?q=iryna")
+                .to_string()
+                .contains("iryna@ministry.example"),
+            "{name}"
+        );
+        assert!(
+            !get("/api/v1/mail/people?q=petro")
+                .to_string()
+                .contains("petro@ministry.example"),
+            "{name}"
+        );
         let people = get("/api/v1/mail/people?q=maria");
         assert_eq!(
             "maria@mail.example", people["people"][0]["email"],

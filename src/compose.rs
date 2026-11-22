@@ -54,7 +54,7 @@ async fn people(request: &Request, ortus: &Arc<Instance>) -> Result<Response, Ap
     let mut out = Vec::new();
     for row in store
         .query(
-            "SELECT name, email FROM core_users WHERE state = 'active' AND (LOWER(name) LIKE $1 OR LOWER(email) LIKE $1) ORDER BY name LIMIT 8",
+            "SELECT name, email FROM core_users WHERE state IN ('active', 'invited') AND (LOWER(name) LIKE $1 OR LOWER(email) LIKE $1) ORDER BY name LIMIT 8",
             &[like.as_str().into()],
         )
         .await?
