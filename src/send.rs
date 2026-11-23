@@ -797,6 +797,21 @@ pub async fn deliver(instance: Arc<Instance>, job: &Job) -> Result<(), String> {
         record(&instance, &delivery, "cancelled", None).await;
         return Ok(());
     };
+    // Already sent (another try of this job, after a lost lease): not again.
+    let unsent = instance
+        .store
+        .query(
+            "SELECT CAST(COUNT(*) AS BIGINT) FROM mail_outbound WHERE message = $1 AND domain = $2 AND state <> 'sent'",
+            &[delivery.message.as_str().into(), delivery.domain.as_str().into()],
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .first()
+        .and_then(|r| r.int(0))
+        .unwrap_or(1);
+    if unsent == 0 {
+        return Ok(());
+    }
     let envelope = Envelope::new(
         Some(delivery.from.parse().map_err(|e| format!("{e}"))?),
         delivery.to.iter().filter_map(|t| t.parse().ok()).collect(),

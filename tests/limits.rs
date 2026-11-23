@@ -95,6 +95,35 @@ fn outbound_limits() {
             .int(0)
             .unwrap();
         assert_eq!(1, audited, "{name}");
+        // A delivery already sent is not sent again (a job tried twice).
+        let rows = block_on(a.store.query("SELECT id, payload, max_attempts FROM ortus_jobs WHERE kind LIKE 'mail.%' AND payload LIKE '%outside.example%' LIMIT 1", &[])).unwrap();
+        let job = ortus_core::jobs::Job {
+            id: rows[0].text(0).unwrap().into(),
+            kind: "mail.deliver".into(),
+            payload: rows[0].text(1).unwrap().into(),
+            attempt: 1,
+            max_attempts: rows[0].int(2).unwrap(),
+        };
+        let message = serde_json::from_str::<serde_json::Value>(&job.payload).unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        block_on(a.store.execute(
+            "UPDATE mail_outbound SET state = 'sent' WHERE message = $1",
+            &[message.as_str().into()],
+        ))
+        .unwrap();
+        assert_eq!(
+            Ok(()),
+            block_on(send::deliver(Arc::clone(&a), &job)),
+            "{name}: no network touched"
+        );
+        let states = block_on(a.store.query(
+            "SELECT state FROM mail_outbound WHERE message = $1",
+            &[message.as_str().into()],
+        ))
+        .unwrap();
+        assert!(states.iter().all(|r| r.text(0) == Some("sent")), "{name}");
         // A day later the count starts again.
         block_on(
             a.store
