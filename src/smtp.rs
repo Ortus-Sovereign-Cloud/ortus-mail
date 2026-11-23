@@ -797,7 +797,8 @@ impl Session {
             },
         );
         let mut stored = format!("{received}{}", results.to_header()).into_bytes();
-        stored.extend_from_slice(&message);
+        // Verdicts the sender wrote itself would read as ours: theirs go.
+        stored.extend_from_slice(&without_their_verdicts(&message));
         let verdicts = json!({
             "spf": format!("{:?}", spf.result()).to_lowercase(),
             "dkim": dkim.iter().map(|d| format!("{:?}", d.result()).to_lowercase()).collect::<Vec<_>>(),
@@ -1017,5 +1018,43 @@ async fn read_data<R: AsyncRead + Unpin>(
         if !too_big && !bare_lf {
             message.extend_from_slice(line);
         }
+    }
+}
+
+/// The message without any Authentication-Results header the sender put
+/// in (a header and its folded lines), so only this server's own verdict
+/// above it says whether it passed. The body is untouched.
+pub fn without_their_verdicts(message: &[u8]) -> Vec<u8> {
+    let end = message
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(message.len(), |p| p + 2);
+    let (head, body) = message.split_at(end);
+    let mut out = Vec::with_capacity(message.len());
+    let mut dropping = false;
+    for line in head.split_inclusive(|b| *b == b'\n') {
+        let folded = line.first().is_some_and(|b| *b == b' ' || *b == b'\t');
+        if !folded {
+            dropping =
+                line.len() >= 23 && line[..23].eq_ignore_ascii_case(b"authentication-results:");
+        }
+        if !dropping {
+            out.extend_from_slice(line);
+        }
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    #[test]
+    fn their_verdicts_go_and_the_body_stays() {
+        let m = b"From: a@x\r\nAuthentication-Results: mx.example; dkim=pass\r\n header.d=bank.example\r\nSubject: Hi\r\n\r\nAuthentication-Results: in the body stays\r\n";
+        let out = String::from_utf8(super::without_their_verdicts(m)).unwrap();
+        assert_eq!(
+            "From: a@x\r\nSubject: Hi\r\n\r\nAuthentication-Results: in the body stays\r\n",
+            out
+        );
     }
 }
