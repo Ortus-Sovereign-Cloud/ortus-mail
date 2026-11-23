@@ -128,6 +128,8 @@ const en = {
   "deliveryFailedShort": "Not delivered",
   "deliveryTryingShort": "Sending",
   "messageFailed": "The message could not be sent. Try again.",
+  "tooManyRecipients": "Too many recipients for one message: 100 at most.",
+  "tooManyToday": "You have sent to many people outside today. Try again tomorrow, or ask an administrator.",
   "cannotSendNoAddress": "You cannot send mail from here yet: your account has no address in this organisation's mail. An administrator can give you one.",
   "replySent": "Reply sent.",
   "snoozed": "Snoozed",

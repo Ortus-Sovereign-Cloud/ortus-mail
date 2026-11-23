@@ -37,6 +37,7 @@ pub fn refusal_code(refused: &Refused) -> &'static str {
         Refused::Policy { .. } => "policy",
         Refused::NeedsReason { .. } => "needs_reason",
         Refused::Failed => "failed",
+        Refused::TooMany { .. } => "too_many",
     }
 }
 

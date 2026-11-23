@@ -1694,6 +1694,9 @@ fn refusal_json(refused: send::Refused) -> Value {
             json!({"type": "forbiddenToSend", "description": format!("Sending {label} mail to {address} needs a reason (ortusReason)."), "ortusNeedsReason": true, "ortusAddress": address, "ortusLabel": label})
         }
         send::Refused::Failed => json!({"type": "serverFail"}),
+        send::Refused::TooMany { limit } => {
+            json!({"type": "tooManyRecipients", "description": if limit == "per_day" { "Too many recipients outside today; try again later." } else { "Too many recipients in one message (100 at most)." }, "ortusLimit": limit})
+        }
     }
 }
 

@@ -776,8 +776,13 @@ export class OrtusMailCompose extends LitElement {
       const r = await jmap([["EmailSubmission/set", { create: { s: { identityId: this.from, emailId: id, ortusSendAt: utc(at), ortusReason: this.reason.trim() || undefined } } }, "x"]]);
       const made = (r.x!.created as Record<string, { id: string }> | undefined)?.s;
       if (!made) {
-        const failed = (r.x!.notCreated as Record<string, { type: string; ortusAddress?: string; ortusNeedsReason?: boolean }>).s;
-        this.error = failed?.type === "forbiddenToSend" ? t(this.localize, failed.ortusNeedsReason ? "needsReason" : "notAllowed", { address: failed.ortusAddress ?? "" }) : t(this.localize, "messageFailed");
+        const failed = (r.x!.notCreated as Record<string, { type: string; ortusAddress?: string; ortusNeedsReason?: boolean; ortusLimit?: string }>).s;
+        this.error =
+          failed?.type === "forbiddenToSend"
+            ? t(this.localize, failed.ortusNeedsReason ? "needsReason" : "notAllowed", { address: failed.ortusAddress ?? "" })
+            : failed?.type === "tooManyRecipients"
+              ? t(this.localize, failed.ortusLimit === "per_day" ? "tooManyToday" : "tooManyRecipients")
+              : t(this.localize, "messageFailed");
         void this.check();
         return;
       }

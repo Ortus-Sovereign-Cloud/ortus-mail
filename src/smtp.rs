@@ -596,6 +596,9 @@ impl Session {
                 "550 5.7.1 To send it to {address}, give a reason: send it from the web\r\n"
             ),
             Err(crate::send::Refused::Failed) => "451 4.3.0 Try again later\r\n".into(),
+            Err(crate::send::Refused::TooMany { .. }) => {
+                "452 4.5.3 Too many recipients today; try again later\r\n".into()
+            }
         }
     }
 

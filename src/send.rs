@@ -49,6 +49,22 @@ pub enum Refused {
     NeedsReason { address: String, label: String },
     /// Storing or queueing failed.
     Failed,
+    /// Too many recipients in one message, or sent outside in a day.
+    TooMany { limit: &'static str },
+}
+
+/// Recipients one message may have (as SMTP submission allows).
+pub const MAX_RECIPIENTS: usize = 100;
+
+/// Recipients outside the installation one person may send to in 24
+/// hours (`ORTUS_MAIL_SEND_PER_DAY`, default 1,000): a stolen session or
+/// app password cannot turn the domain into a spam source.
+fn per_day() -> i64 {
+    std::env::var("ORTUS_MAIL_SEND_PER_DAY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n: &i64| *n > 0)
+        .unwrap_or(1000)
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -329,7 +345,36 @@ pub async fn check(instance: &Instance, out: &Outgoing<'_>) -> Result<(), Refuse
 /// Sends a message. Nothing goes anywhere unless every recipient may get it.
 pub async fn send(instance: &Instance, out: &Outgoing<'_>) -> Result<Sent, Refused> {
     let store = instance.store.as_ref();
+    if out.to.len() > MAX_RECIPIENTS {
+        return Err(Refused::TooMany {
+            limit: "per_message",
+        });
+    }
     let Routed { from, here, away } = route(instance, out, true).await?;
+    let outside: usize = away.values().map(Vec::len).sum();
+    if outside > 0 {
+        let day_ago = ortus_core::program::now_ms() - 24 * 60 * 60 * 1000;
+        let sent = store
+            .query(
+                "SELECT CAST(COUNT(*) AS BIGINT) FROM mail_outbound WHERE user_id = $1 AND created_at > $2",
+                &[out.user.into(), day_ago.into()],
+            )
+            .await
+            .map_err(|_| Refused::Failed)?
+            .first()
+            .and_then(|r| r.int(0))
+            .unwrap_or(0);
+        if sent + outside as i64 > per_day() {
+            ortus_core::auth::audit(
+                instance,
+                ortus_core::audit::Event::new("mail.limit", ortus_core::audit::Outcome::Refused)
+                    .by(out.user)
+                    .with(json!({"sent_today": sent, "recipients": outside, "limit": per_day()})),
+            )
+            .await;
+            return Err(Refused::TooMany { limit: "per_day" });
+        }
+    }
     let signed = sign(instance, &domain_of(&from), out.raw).await;
     let sent_box = store::by_role(store, out.user, "sent")
         .await

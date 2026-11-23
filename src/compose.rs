@@ -140,6 +140,9 @@ async fn check(request: &Request, ortus: &Arc<Instance>) -> Result<Response, Api
         Err(Refused::NeedsReason { address, label }) => {
             json!({"ok": false, "problem": "needs_reason", "address": address, "label": label})
         }
+        Err(Refused::TooMany { limit }) => {
+            json!({"ok": false, "problem": "too_many", "limit": limit})
+        }
         Err(Refused::Failed) => return Err(ApiError::internal()),
     };
     Ok(ok(&answer))

@@ -127,6 +127,8 @@ const messages: Record<MailKey, MailMessage> = {
   "deliveryFailedShort": "Nie doręczono",
   "deliveryTryingShort": "Wysyłanie",
   "messageFailed": "Nie udało się wysłać wiadomości. Spróbuj ponownie.",
+  "tooManyRecipients": "Za dużo odbiorców w jednej wiadomości: najwyżej 100.",
+  "tooManyToday": "Wysłano dziś do wielu osób spoza organizacji. Spróbuj jutro lub poproś administratora.",
   "cannotSendNoAddress": "Nie możesz jeszcze stąd wysyłać poczty: Twoje konto nie ma adresu w poczcie tej organizacji. Może go nadać administrator.",
   "replySent": "Odpowiedź wysłana.",
   "snoozed": "Odłożone",

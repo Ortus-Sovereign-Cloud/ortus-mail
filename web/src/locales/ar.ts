@@ -127,6 +127,8 @@ const messages: Record<MailKey, MailMessage> = {
   "deliveryFailedShort": "لم تُسلَّم",
   "deliveryTryingShort": "قيد الإرسال",
   "messageFailed": "تعذّر إرسال الرسالة. حاول مرة أخرى.",
+  "tooManyRecipients": "عدد كبير جدًا من المستلمين في رسالة واحدة: 100 على الأكثر.",
+  "tooManyToday": "أرسلت اليوم إلى كثيرين من خارج المؤسسة. حاول غدًا أو اطلب من المسؤول.",
   "cannotSendNoAddress": "لا يمكنك إرسال البريد من هنا بعد: ليس لحسابك عنوان في بريد هذه المؤسسة. يمكن للمسؤول أن يمنحك عنوانًا.",
   "replySent": "أُرسل الرد.",
   "snoozed": "المؤجلة",
