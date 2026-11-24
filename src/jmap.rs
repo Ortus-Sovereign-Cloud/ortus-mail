@@ -525,18 +525,16 @@ const EMAIL_DEFAULT: &[&str] = &[
     "attachments",
 ];
 
-/// The stored files of `found`, in order, read several at a time (an
-/// inbox page from S3 one by one waited a round trip per message).
+/// Message files read at once.
+const FILES_AT_ONCE: usize = 16;
+
+/// The stored files of `found` (at most [`FILES_AT_ONCE`]), in order,
+/// read at the same time (an inbox page from S3 one by one waited a round
+/// trip per message).
 async fn files_of(ctx: &Ctx<'_>, found: &[Stored]) -> Vec<Vec<u8>> {
-    const AT_ONCE: usize = 16;
     let mut out = vec![Vec::new(); found.len()];
     let mut reading = tokio::task::JoinSet::new();
     for (index, s) in found.iter().enumerate() {
-        if reading.len() >= AT_ONCE {
-            if let Some(Ok((i, raw))) = reading.join_next().await {
-                out[i] = raw;
-            }
-        }
         let (files, blob) = (std::sync::Arc::clone(&ctx.instance.files), s.blob.clone());
         reading.spawn(async move {
             (
@@ -590,11 +588,9 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
         )
     });
     let found = stored(ctx, &ids).await?;
-    let mut raws = if needs_file {
-        files_of(ctx, &found).await
-    } else {
-        vec![Vec::new(); found.len()]
-    };
+    // The files are read a window at a time (several at once), and each
+    // window is let go before the next: never the whole page in memory.
+    let mut raws: Vec<Vec<u8>> = Vec::new();
     let mut deliveries = if properties.iter().any(|p| p == "ortusDelivery") {
         let ids: Vec<String> = found.iter().map(|s| s.id.clone()).collect();
         store::deliveries_of(ctx.store(), &ctx.user.id, &ids).await?
@@ -605,7 +601,15 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
     for (index, s) in found.iter().enumerate() {
         let mut email = Map::new();
         email.insert("id".into(), json!(s.id));
-        let raw = std::mem::take(&mut raws[index]);
+        if needs_file && index % FILES_AT_ONCE == 0 {
+            let end = (index + FILES_AT_ONCE).min(found.len());
+            raws = files_of(ctx, &found[index..end]).await;
+        }
+        let raw = if needs_file {
+            std::mem::take(&mut raws[index % FILES_AT_ONCE])
+        } else {
+            Vec::new()
+        };
         let parsed = if needs_file {
             MessageParser::default().parse(&raw)
         } else {

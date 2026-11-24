@@ -74,21 +74,18 @@ fn automated(address: &str) -> bool {
     })
 }
 
-/// The files named, sixteen at a time; `None` where none is wanted or
-/// it could not be read.
+/// Files read at once.
+const AT_ONCE: usize = 16;
+
+/// The files named (at most [`AT_ONCE`]), read at the same time; `None`
+/// where none is wanted or it could not be read.
 async fn read_all(instance: &Arc<Instance>, blobs: &[Option<String>]) -> Vec<Option<Vec<u8>>> {
-    const AT_ONCE: usize = 16;
     let mut out: Vec<Option<Vec<u8>>> = vec![None; blobs.len()];
     let mut reading = tokio::task::JoinSet::new();
     for (index, blob) in blobs.iter().enumerate() {
         let Some(blob) = blob.clone().filter(|b| !b.is_empty()) else {
             continue;
         };
-        if reading.len() >= AT_ONCE {
-            if let Some(Ok((i, raw))) = reading.join_next().await {
-                out[i] = raw;
-            }
-        }
         let files = Arc::clone(&instance.files);
         reading.spawn(async move { (index, files.get(&blob).await.ok().flatten()) });
     }
@@ -139,10 +136,15 @@ async fn catch_up(request: &Request, instance: &Arc<Instance>) -> Result<Respons
             (!skip).then(|| r.text(7).unwrap_or_default().to_string())
         })
         .collect();
-    let mut raws = read_all(instance, &wanted).await;
+    // A window of files at a time, each let go before the next.
+    let mut raws: Vec<Option<Vec<u8>>> = Vec::new();
     let mut reply = Vec::new();
     let mut invites = Vec::new();
     for (index, r) in rows.iter().enumerate() {
+        if index % AT_ONCE == 0 {
+            let end = (index + AT_ONCE).min(wanted.len());
+            raws = read_all(instance, &wanted[index..end]).await;
+        }
         let (id, from, name, subject, recipients, flags) = (
             r.text(0).unwrap_or_default(),
             r.text(1).unwrap_or_default().to_lowercase(),
@@ -155,7 +157,7 @@ async fn catch_up(request: &Request, instance: &Arc<Instance>) -> Result<Respons
             continue;
         }
         // An invitation still waiting for an answer.
-        if let Some(raw) = raws[index].take() {
+        if let Some(raw) = raws[index % AT_ONCE].take() {
             if let Some(inv) = crate::invites::shown(instance, &me.id, &raw).await {
                 let waiting = inv["method"] != "REPLY"
                     && inv["method"] != "CANCEL"
