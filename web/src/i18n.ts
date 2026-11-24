@@ -1,4 +1,4 @@
-// The mail app's texts, in the six languages, through the core's kit.
+// The mail app's texts, in the languages of Ortus, through the core's kit.
 import { appText, registerAppMessages, type LocalizeController, type Message } from "ortus-kit";
 import en, { type MailKey } from "./locales/en.js";
 
@@ -7,6 +7,8 @@ const catalogs: Record<string, () => Promise<{ default: Record<string, Message> 
   uk: () => import("./locales/uk.js"),
   de: () => import("./locales/de.js"),
   fr: () => import("./locales/fr.js"),
+  es: () => import("./locales/es.js"),
+  it: () => import("./locales/it.js"),
   ar: () => import("./locales/ar.js"),
 };
 

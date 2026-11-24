@@ -815,12 +815,16 @@ async fn retry(
 }
 
 /// The note asking an owner for their old password, in their language.
+/// Spanish and Italian are translated without a native speaker and need
+/// review before release in Spain and Italy (see web/src/locales/REVIEW.md).
 fn reconnect_text(language: Option<&str>, host: &str, login: &str, link: &str) -> (String, String) {
     match language.unwrap_or("en") {
         "pl" => ("Twoja stara skrzynka potrzebuje hasła".into(), format!("Nie udało się skopiować poczty z {host}: serwer odrzucił hasło konta {login}.\n\nPodaj hasło starego serwera tutaj, a kopiowanie ruszy dalej:\n{link}\n")),
         "uk" => ("Ваша стара скринька потребує пароля".into(), format!("Не вдалося скопіювати пошту з {host}: сервер не прийняв пароль облікового запису {login}.\n\nВведіть пароль старого сервера тут, і копіювання продовжиться:\n{link}\n")),
         "de" => ("Ihr altes Postfach braucht Ihr Passwort".into(), format!("Ihre E-Mails von {host} konnten nicht kopiert werden: Der Server hat das Passwort für {login} abgelehnt.\n\nGeben Sie hier das Passwort des alten Servers ein, dann geht das Kopieren weiter:\n{link}\n")),
         "fr" => ("Votre ancienne boîte a besoin de votre mot de passe".into(), format!("Votre courrier de {host} n’a pas pu être copié : le serveur a refusé le mot de passe de {login}.\n\nSaisissez ici le mot de passe de l’ancien serveur et la copie reprendra :\n{link}\n")),
+        "es" => ("Su buzón anterior necesita su contraseña".into(), format!("No se ha podido copiar su correo de {host}: el servidor ha rechazado la contraseña de {login}.\n\nIndique aquí la contraseña del servidor anterior y la copia continuará:\n{link}\n")),
+        "it" => ("La Sua vecchia casella ha bisogno della password".into(), format!("Non è stato possibile copiare la Sua posta da {host}: il server ha rifiutato la password di {login}.\n\nInserisca qui la password del vecchio server e la copia riprenderà:\n{link}\n")),
         "ar" => ("صندوق بريدك القديم يحتاج إلى كلمة المرور".into(), format!("تعذّر نسخ بريدك من {host}: رفض الخادم كلمة مرور الحساب {login}.\n\nأدخل كلمة مرور الخادم القديم هنا ليستأنف النسخ:\n{link}\n")),
         _ => ("Your old mailbox needs your password".into(), format!("Your mail from {host} could not be copied: the server refused the password for {login}.\n\nEnter the old server's password here and copying goes on:\n{link}\n")),
     }
@@ -1077,5 +1081,29 @@ mod tests {
         assert_eq!(Some(17), fetched_uid(line));
         assert_eq!(vec!["\\Seen", "$Forwarded", "flood"], fetched_flags(line));
         assert_eq!("\"a\\\"b\\\\c\"", quoted("a\"b\\c"));
+    }
+
+    #[test]
+    fn every_language_has_its_reconnect_note() {
+        let (en_subject, _) = reconnect_text(
+            None,
+            "imap.old.example",
+            "anna",
+            "https://ortus.cc/mail/reconnect/1",
+        );
+        for lang in ["en", "pl", "uk", "de", "fr", "es", "it", "ar"] {
+            let (subject, body) = reconnect_text(
+                Some(lang),
+                "imap.old.example",
+                "anna",
+                "https://ortus.cc/mail/reconnect/1",
+            );
+            assert!(
+                body.contains("imap.old.example") && body.contains("anna"),
+                "{lang}"
+            );
+            assert!(body.contains("https://ortus.cc/mail/reconnect/1"), "{lang}");
+            assert_eq!(lang == "en", subject == en_subject, "{lang}");
+        }
     }
 }

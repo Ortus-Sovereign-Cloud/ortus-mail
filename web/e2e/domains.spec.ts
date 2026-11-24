@@ -1,11 +1,13 @@
 // Admin › Domains: add a domain, publish its records (in the test DNS
-// server's zone), watch the checks turn green; in six languages.
+// server's zone), watch the checks turn green; in every language.
 import { writeFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import ar from "../src/locales/ar.js";
 import de from "../src/locales/de.js";
 import en from "../src/locales/en.js";
+import es from "../src/locales/es.js";
 import fr from "../src/locales/fr.js";
+import it from "../src/locales/it.js";
 import pl from "../src/locales/pl.js";
 import uk from "../src/locales/uk.js";
 
@@ -57,7 +59,7 @@ test("the owner adds a domain, publishes its records and gets it verified", asyn
   expect((await download).suggestedFilename()).toBe("ministry.example.zone");
 });
 
-for (const [code, texts, dir] of [["en", en, "ltr"], ["pl", pl, "ltr"], ["uk", uk, "ltr"], ["de", de, "ltr"], ["fr", fr, "ltr"], ["ar", ar, "rtl"]] as const) {
+for (const [code, texts, dir] of [["en", en, "ltr"], ["pl", pl, "ltr"], ["uk", uk, "ltr"], ["de", de, "ltr"], ["fr", fr, "ltr"], ["es", es, "ltr"], ["it", it, "ltr"], ["ar", ar, "rtl"]] as const) {
   test(`the domains page is in ${code}`, async ({ page }) => {
     await page.addInitScript((c) => localStorage.setItem("ortus.locale", c), code);
     await page.goto("/admin/domains");

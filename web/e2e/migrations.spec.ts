@@ -1,11 +1,13 @@
 // Admin › Migrations: an import is started, its failure is shown with its
 // reason and retried, the owner is asked and gives the password on the
-// reconnect page; in six languages.
+// reconnect page; in every language.
 import { expect, test } from "@playwright/test";
 import ar from "../src/locales/ar.js";
 import de from "../src/locales/de.js";
 import en from "../src/locales/en.js";
+import es from "../src/locales/es.js";
 import fr from "../src/locales/fr.js";
+import it from "../src/locales/it.js";
 import pl from "../src/locales/pl.js";
 import uk from "../src/locales/uk.js";
 
@@ -43,7 +45,7 @@ test("an import fails with its reason, is retried, and the owner is asked", asyn
   await expect(reconnect.getByRole("button", { name: en.continueCopying })).toBeVisible({ timeout: 15_000 });
 });
 
-for (const [code, texts, dir] of [["en", en, "ltr"], ["pl", pl, "ltr"], ["uk", uk, "ltr"], ["de", de, "ltr"], ["fr", fr, "ltr"], ["ar", ar, "rtl"]] as const) {
+for (const [code, texts, dir] of [["en", en, "ltr"], ["pl", pl, "ltr"], ["uk", uk, "ltr"], ["de", de, "ltr"], ["fr", fr, "ltr"], ["es", es, "ltr"], ["it", it, "ltr"], ["ar", ar, "rtl"]] as const) {
   test(`the migrations page is in ${code}`, async ({ page }) => {
     const errors: string[] = [];
     page.on("console", (m) => m.type() === "error" && errors.push(m.text()));

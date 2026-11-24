@@ -1,18 +1,20 @@
-// Compose (board WebCompose) in six languages, and its flows: suggestions,
+// Compose (board WebCompose) in every language, and its flows: suggestions,
 // a draft saved as one writes, an attachment, undo send, send later and
 // calling it back, the label policy asking for a reason; snooze.
 import { expect, test, type Page } from "@playwright/test";
 import ar from "../src/locales/ar.js";
 import de from "../src/locales/de.js";
 import en from "../src/locales/en.js";
+import es from "../src/locales/es.js";
 import fr from "../src/locales/fr.js";
+import it from "../src/locales/it.js";
 import pl from "../src/locales/pl.js";
 import uk from "../src/locales/uk.js";
 
 const compose = (page: Page) => page.locator("ortus-mail-compose");
 const inbox = (page: Page) => page.locator("ortus-mail-inbox");
 
-for (const [code, texts, dir] of [["en", en, "ltr"], ["pl", pl, "ltr"], ["uk", uk, "ltr"], ["de", de, "ltr"], ["fr", fr, "ltr"], ["ar", ar, "rtl"]] as const) {
+for (const [code, texts, dir] of [["en", en, "ltr"], ["pl", pl, "ltr"], ["uk", uk, "ltr"], ["de", de, "ltr"], ["fr", fr, "ltr"], ["es", es, "ltr"], ["it", it, "ltr"], ["ar", ar, "rtl"]] as const) {
   test(`Compose opens in ${code}`, async ({ page }) => {
     const errors: string[] = [];
     page.on("console", (m) => m.type() === "error" && errors.push(m.text()));

@@ -1,9 +1,11 @@
-// The mail app's client loads at /mail inside the shell, in six languages.
+// The mail app's client loads at /mail inside the shell, in every language.
 import { expect, test } from "@playwright/test";
 import ar from "../src/locales/ar.js";
 import de from "../src/locales/de.js";
 import en from "../src/locales/en.js";
+import es from "../src/locales/es.js";
 import fr from "../src/locales/fr.js";
+import it from "../src/locales/it.js";
 import pl from "../src/locales/pl.js";
 import uk from "../src/locales/uk.js";
 
@@ -13,6 +15,8 @@ const LOCALES = [
   { code: "uk", dir: "ltr", texts: uk },
   { code: "de", dir: "ltr", texts: de },
   { code: "fr", dir: "ltr", texts: fr },
+  { code: "es", dir: "ltr", texts: es },
+  { code: "it", dir: "ltr", texts: it },
   { code: "ar", dir: "rtl", texts: ar },
 ] as const;
 
