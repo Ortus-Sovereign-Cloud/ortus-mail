@@ -74,6 +74,32 @@ fn automated(address: &str) -> bool {
     })
 }
 
+/// The files named, sixteen at a time; `None` where none is wanted or
+/// it could not be read.
+async fn read_all(instance: &Arc<Instance>, blobs: &[Option<String>]) -> Vec<Option<Vec<u8>>> {
+    const AT_ONCE: usize = 16;
+    let mut out: Vec<Option<Vec<u8>>> = vec![None; blobs.len()];
+    let mut reading = tokio::task::JoinSet::new();
+    for (index, blob) in blobs.iter().enumerate() {
+        let Some(blob) = blob.clone().filter(|b| !b.is_empty()) else {
+            continue;
+        };
+        if reading.len() >= AT_ONCE {
+            if let Some(Ok((i, raw))) = reading.join_next().await {
+                out[i] = raw;
+            }
+        }
+        let files = Arc::clone(&instance.files);
+        reading.spawn(async move { (index, files.get(&blob).await.ok().flatten()) });
+    }
+    while let Some(done) = reading.join_next().await {
+        if let Ok((i, raw)) = done {
+            out[i] = raw;
+        }
+    }
+    out
+}
+
 async fn catch_up(request: &Request, instance: &Arc<Instance>) -> Result<Response, ApiError> {
     let me = ortus_core::auth::current(request, instance)
         .await
@@ -95,13 +121,28 @@ async fn catch_up(request: &Request, instance: &Arc<Instance>) -> Result<Respons
     mine.push(me.email.to_lowercase());
     let rows = s
         .query(
-            "SELECT m.id, m.from_addr, m.from_name, m.subject, m.recipients, e.flags, m.received_at FROM mail_entries e JOIN mail_messages m ON m.id = e.message JOIN mail_mailboxes b ON b.id = e.mailbox_id WHERE b.user_id = $1 AND b.role = 'inbox' AND m.received_at > $2 AND m.spam = 0 ORDER BY m.received_at DESC LIMIT 60",
+            "SELECT m.id, m.from_addr, m.from_name, m.subject, m.recipients, e.flags, m.received_at, m.blob FROM mail_entries e JOIN mail_messages m ON m.id = e.message JOIN mail_mailboxes b ON b.id = e.mailbox_id WHERE b.user_id = $1 AND b.role = 'inbox' AND m.received_at > $2 AND m.spam = 0 ORDER BY m.received_at DESC LIMIT 60",
             &[me.id.as_str().into(), since.into()],
         )
         .await?;
+    // Each message from someone else is looked at for an invitation: their
+    // files read several at a time, not one after another.
+    let wanted: Vec<Option<String>> = rows
+        .iter()
+        .map(|r| {
+            let (from, flags) = (
+                r.text(1).unwrap_or_default().to_lowercase(),
+                r.text(5).unwrap_or_default(),
+            );
+            let skip =
+                mine.contains(&from) || flags.contains("\\Answered") || flags.contains("\\Deleted");
+            (!skip).then(|| r.text(7).unwrap_or_default().to_string())
+        })
+        .collect();
+    let mut raws = read_all(instance, &wanted).await;
     let mut reply = Vec::new();
     let mut invites = Vec::new();
-    for r in &rows {
+    for (index, r) in rows.iter().enumerate() {
         let (id, from, name, subject, recipients, flags) = (
             r.text(0).unwrap_or_default(),
             r.text(1).unwrap_or_default().to_lowercase(),
@@ -114,7 +155,7 @@ async fn catch_up(request: &Request, instance: &Arc<Instance>) -> Result<Respons
             continue;
         }
         // An invitation still waiting for an answer.
-        if let Ok(Some(raw)) = crate::store::raw(instance, &me.id, id).await {
+        if let Some(raw) = raws[index].take() {
             if let Some(inv) = crate::invites::shown(instance, &me.id, &raw).await {
                 let waiting = inv["method"] != "REPLY"
                     && inv["method"] != "CANCEL"
