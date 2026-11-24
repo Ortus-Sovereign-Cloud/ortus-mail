@@ -346,22 +346,45 @@ fn verified(auth: Option<&str>) -> bool {
 }
 
 async fn stored(ctx: &Ctx<'_>, ids: &[String]) -> Result<Vec<Stored>, MethodError> {
-    let mut out = Vec::new();
-    for id in ids {
-        let rows = ctx
+    // Two queries for a page of messages, not two per message.
+    let mut messages: HashMap<String, ortus_core::storage::Row> = HashMap::new();
+    let mut entries: HashMap<String, Vec<ortus_core::storage::Row>> = HashMap::new();
+    for chunk in ids.chunks(256) {
+        let (list, mut values) = ortus_core::storage::any_of(2, chunk);
+        values.insert(0, ctx.user.id.as_str().into());
+        for r in ctx
             .store()
             .query(
-                "SELECT id, thread_id, blob, size, received_at, subject, preview, attachments, category, auth FROM mail_messages WHERE id = $1 AND user_id = $2",
-                &[id.as_str().into(), ctx.user.id.as_str().into()],
+                &format!("SELECT id, thread_id, blob, size, received_at, subject, preview, attachments, category, auth FROM mail_messages WHERE user_id = $1 AND id IN ({list})"),
+                &values,
             )
-            .await?;
-        let Some(r) = rows.first() else { continue };
-        let entries = ctx.store().query("SELECT mailbox_id, uid, flags FROM mail_entries WHERE message = $1 ORDER BY mailbox_id", &[id.as_str().into()]).await?;
-        if entries.is_empty() {
-            continue;
+            .await?
+        {
+            messages.insert(r.text(0).unwrap_or_default().to_string(), r);
         }
+        let (list, values) = ortus_core::storage::any_of(1, chunk);
+        for e in ctx
+            .store()
+            .query(
+                &format!("SELECT message, mailbox_id, uid, flags FROM mail_entries WHERE message IN ({list}) ORDER BY message, mailbox_id"),
+                &values,
+            )
+            .await?
+        {
+            entries
+                .entry(e.text(0).unwrap_or_default().to_string())
+                .or_default()
+                .push(e);
+        }
+    }
+    let mut out = Vec::new();
+    for id in ids {
+        let Some(r) = messages.get(id) else { continue };
+        let Some(entries) = entries.get(id).filter(|e| !e.is_empty()) else {
+            continue;
+        };
         let keywords: Vec<String> = entries[0]
-            .text(2)
+            .text(3)
             .unwrap_or_default()
             .split(' ')
             .filter(|f| !f.is_empty())
@@ -382,8 +405,8 @@ async fn stored(ctx: &Ctx<'_>, ids: &[String]) -> Result<Vec<Stored>, MethodErro
                 .iter()
                 .map(|e| {
                     (
-                        e.text(0).unwrap_or_default().to_string(),
-                        e.int(1).unwrap_or(0),
+                        e.text(1).unwrap_or_default().to_string(),
+                        e.int(2).unwrap_or(0),
                     )
                 })
                 .collect(),
@@ -502,6 +525,34 @@ const EMAIL_DEFAULT: &[&str] = &[
     "attachments",
 ];
 
+/// The stored files of `found`, in order, read several at a time (an
+/// inbox page from S3 one by one waited a round trip per message).
+async fn files_of(ctx: &Ctx<'_>, found: &[Stored]) -> Vec<Vec<u8>> {
+    const AT_ONCE: usize = 16;
+    let mut out = vec![Vec::new(); found.len()];
+    let mut reading = tokio::task::JoinSet::new();
+    for (index, s) in found.iter().enumerate() {
+        if reading.len() >= AT_ONCE {
+            if let Some(Ok((i, raw))) = reading.join_next().await {
+                out[i] = raw;
+            }
+        }
+        let (files, blob) = (std::sync::Arc::clone(&ctx.instance.files), s.blob.clone());
+        reading.spawn(async move {
+            (
+                index,
+                files.get(&blob).await.ok().flatten().unwrap_or_default(),
+            )
+        });
+    }
+    while let Some(done) = reading.join_next().await {
+        if let Ok((i, raw)) = done {
+            out[i] = raw;
+        }
+    }
+    out
+}
+
 async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
     let ids = ids_arg(args, "ids")?.ok_or_else(|| MethodError::invalid("Email/get needs ids"))?;
     if ids.len() > MAX_OBJECTS {
@@ -539,21 +590,22 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
         )
     });
     let found = stored(ctx, &ids).await?;
+    let mut raws = if needs_file {
+        files_of(ctx, &found).await
+    } else {
+        vec![Vec::new(); found.len()]
+    };
+    let mut deliveries = if properties.iter().any(|p| p == "ortusDelivery") {
+        let ids: Vec<String> = found.iter().map(|s| s.id.clone()).collect();
+        store::deliveries_of(ctx.store(), &ctx.user.id, &ids).await?
+    } else {
+        HashMap::new()
+    };
     let mut list = Vec::new();
-    for s in &found {
+    for (index, s) in found.iter().enumerate() {
         let mut email = Map::new();
         email.insert("id".into(), json!(s.id));
-        let raw = if needs_file {
-            ctx.instance
-                .files
-                .get(&s.blob)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let raw = std::mem::take(&mut raws[index]);
         let parsed = if needs_file {
             MessageParser::default().parse(&raw)
         } else {
@@ -589,7 +641,7 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
                 // How a message one sent is getting to each recipient
                 // outside (empty for mail received or sent inside).
                 "ortusDelivery" => {
-                    json!(store::deliveries(ctx.store(), &ctx.user.id, &s.id).await?)
+                    json!(deliveries.remove(&s.id).unwrap_or_default())
                 }
                 "ortusSnoozedUntil" => store::snoozed_until(ctx.store(), &ctx.user.id, &s.id)
                     .await?

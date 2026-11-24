@@ -222,6 +222,37 @@ pub const MIGRATIONS: &[Migration] = &[
 
 /// How each recipient of a message one sent is getting it: state (queued,
 /// deferred, sent, bounced), tries, the last error, when it last changed.
+/// [`deliveries`] of several messages, in one query.
+pub async fn deliveries_of(
+    store: &dyn AsyncStore,
+    user: &str,
+    messages: &[String],
+) -> StoreResult<std::collections::HashMap<String, Vec<serde_json::Value>>> {
+    let mut out: std::collections::HashMap<String, Vec<serde_json::Value>> = Default::default();
+    for chunk in messages.chunks(256) {
+        let (list, mut values) = ortus_core::storage::any_of(2, chunk);
+        values.insert(0, user.into());
+        for r in store
+            .query(
+                &format!("SELECT message, recipient, state, attempts, last_error, updated_at FROM mail_outbound WHERE user_id = $1 AND message IN ({list}) ORDER BY message, recipient"),
+                &values,
+            )
+            .await?
+        {
+            out.entry(r.text(0).unwrap_or_default().to_string())
+                .or_default()
+                .push(serde_json::json!({
+                    "recipient": r.text(1),
+                    "state": r.text(2),
+                    "attempts": r.int(3),
+                    "lastError": r.text(4),
+                    "updatedAt": r.int(5),
+                }));
+        }
+    }
+    Ok(out)
+}
+
 pub async fn deliveries(
     store: &dyn AsyncStore,
     user: &str,
