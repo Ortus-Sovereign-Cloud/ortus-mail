@@ -157,3 +157,34 @@ fn mail_apps_read_and_file_mail_over_imap() {
         );
     }
 }
+
+#[test]
+fn one_address_cannot_take_every_imap_connection() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (_name, instance, _keep) = common::installations().remove(0);
+    let (port, _stop) = listen(&instance, false);
+    let greeted = |s: &TcpStream| {
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(s)
+            .read_line(&mut line)
+            .map(|_| line)
+            .unwrap_or_default()
+    };
+    // Up to the cap, each connection is greeted.
+    let mut held = Vec::new();
+    for _ in 0..imap::PER_ADDRESS {
+        let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        assert!(greeted(&s).starts_with("* OK"));
+        held.push(s);
+    }
+    // The next one from the same address is closed unanswered.
+    let extra = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    assert_eq!("", greeted(&extra));
+    // One goes, and another may come.
+    drop(held.pop());
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let again = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    assert!(greeted(&again).starts_with("* OK"));
+}

@@ -26,6 +26,11 @@ const IDLE_CHECK: Duration = Duration::from_secs(5);
 const INACTIVITY: Duration = Duration::from_secs(30 * 60);
 /// Connections at once on one port.
 const MAX_CONNECTIONS: usize = 1000;
+/// Connections at once from one address (an IPv6 /64 is one). Mail apps
+/// keep a few each (one waiting per folder), and an office behind one NAT
+/// shares an address, so this is generous; it stops one machine taking
+/// every connection.
+pub const PER_ADDRESS: usize = 100;
 /// A command, literals included, before signing in.
 const MAX_BEFORE_SIGN_IN: usize = 64 * 1024;
 const HANDSHAKE: Duration = Duration::from_secs(30);
@@ -72,6 +77,7 @@ pub async fn serve(
 ) -> Result<(), String> {
     let tls = crate::smtp::tls_config();
     let open = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    let per_address: crate::smtp::Addresses = Arc::default();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -81,9 +87,11 @@ pub async fn serve(
                     continue;
                 };
                 let Ok(permit) = Arc::clone(&open).try_acquire_owned() else { continue };
+                let Some(slot) = crate::smtp::Slot::take(&per_address, peer.ip(), PER_ADDRESS) else { continue };
                 let (instance, tls) = (Arc::clone(&instance), tls.clone());
                 tokio::spawn(async move {
                     let _permit = permit;
+                    let _slot = slot;
                     if let Err(e) = Session::new(instance, peer, tls).run(socket, implicit_tls).await {
                         if !e.contains("went away") && !e.contains("close_notify") {
                             eprintln!("ortus: mail: IMAP from {peer}: {e}");

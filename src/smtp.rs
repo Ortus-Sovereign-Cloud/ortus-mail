@@ -41,19 +41,38 @@ const MAX_CONNECTIONS: usize = 1000;
 /// Connections one address may hold at once.
 const PER_ADDRESS: usize = 20;
 
-type Addresses = Arc<std::sync::Mutex<HashMap<IpAddr, usize>>>;
+pub(crate) type Addresses = Arc<std::sync::Mutex<HashMap<IpAddr, usize>>>;
+
+/// The address connections are counted by: an IPv4 address, or an IPv6
+/// /64 (one machine or home holds a whole /64).
+pub(crate) fn network_of(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let mut o = v6.octets();
+                o[8..].fill(0);
+                IpAddr::V6(o.into())
+            }
+        },
+    }
+}
 
 /// One address's hold on a connection slot, given back when dropped.
-struct Slot {
+pub(crate) struct Slot {
     all: Addresses,
     ip: IpAddr,
 }
 
 impl Slot {
-    fn take(all: &Addresses, ip: IpAddr) -> Option<Slot> {
+    /// A slot for `ip`'s network (an IPv6 /64 is one), if it holds fewer
+    /// than `limit`.
+    pub(crate) fn take(all: &Addresses, ip: IpAddr, limit: usize) -> Option<Slot> {
+        let ip = network_of(ip);
         let mut map = all.lock().unwrap_or_else(|e| e.into_inner());
         let n = map.entry(ip).or_insert(0);
-        if *n >= PER_ADDRESS {
+        if *n >= limit {
             return None;
         }
         *n += 1;
@@ -248,7 +267,7 @@ pub async fn serve_as(
                 let Ok(permit) = Arc::clone(&open).try_acquire_owned() else { continue };
                 // At most PER_ADDRESS connections from one address, so one
                 // sender cannot hold every slot.
-                let Some(slot) = Slot::take(&per_address, peer.ip()) else { continue };
+                let Some(slot) = Slot::take(&per_address, peer.ip(), PER_ADDRESS) else { continue };
                 let (instance, authenticator, tls) = (Arc::clone(&instance), Arc::clone(&authenticator), tls.clone());
                 tokio::spawn(async move {
                     let _permit = permit;

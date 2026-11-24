@@ -1,0 +1,4 @@
+["public","PUBLIC",0,"{\"outside\":\"allow\",\"partners\":\"allow\",\"links\":\"allow\",\"forwarding\":\"allow\",\"phones\":true,\"watermark\":false}",0]
+["internal","INTERNAL",1,"{\"outside\":\"warn\",\"partners\":\"allow\",\"links\":\"deny\",\"forwarding\":\"warn\",\"phones\":true,\"watermark\":false}",0]
+["official-sensitive","OFFICIAL-SENSITIVE",2,"{\"outside\":\"deny\",\"partners\":\"warn\",\"links\":\"deny\",\"forwarding\":\"deny\",\"phones\":true,\"watermark\":true}",0]
+["secret","SECRET",3,"{\"outside\":\"deny\",\"partners\":\"deny\",\"links\":\"deny\",\"forwarding\":\"deny\",\"phones\":false,\"watermark\":true}",0]
