@@ -105,6 +105,7 @@ const en = {
   "noSubject": "(no subject)",
   "reading": "Reading",
   "nothingSelected": "Choose a message to read it.",
+  "back": "Back",
   "archiveIt": "Archive",
   "deleteForever": "Delete for good",
   "moveToTrash": "Move to trash",

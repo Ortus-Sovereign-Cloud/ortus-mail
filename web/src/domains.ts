@@ -254,6 +254,27 @@ export class OrtusMailDomains extends LitElement {
           display: none;
         }
       }
+      /* A phone: one card a row, and the records table scrolls in its own box. */
+      @media (max-width: 720px) {
+        .cards {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .cards * {
+          overflow-wrap: anywhere;
+        }
+        table {
+          display: block;
+          overflow-x: auto;
+          /* Hidden labels in it stay in its box. */
+          position: relative;
+        }
+        .records header div {
+          flex-wrap: wrap;
+        }
+        .records header button {
+          white-space: nowrap;
+        }
+      }
     `,
   ];
 

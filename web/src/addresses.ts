@@ -134,6 +134,15 @@ export class OrtusMailAddresses extends LitElement {
         font-size: 13px;
         margin: 8px 0 0;
       }
+      /* A phone: a table scrolls sideways in its own box. */
+      @media (max-width: 720px) {
+        table {
+          display: block;
+          overflow-x: auto;
+          /* Hidden labels in it stay in its box. */
+          position: relative;
+        }
+      }
     `,
   ];
 

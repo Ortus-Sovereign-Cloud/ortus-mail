@@ -504,6 +504,54 @@ export class OrtusMailCompose extends LitElement {
           grid-template-columns: minmax(0, 1fr);
         }
       }
+      @media (max-width: 720px) {
+        :host {
+          padding-block: 16px 24px;
+          padding-inline: 16px;
+        }
+        .row {
+          padding-inline: 16px;
+          grid-template-columns: 56px minmax(0, 1fr);
+        }
+        .recipients input {
+          min-inline-size: 120px;
+        }
+        [role="listbox"] {
+          min-inline-size: 0;
+          inline-size: min(320px, calc(100vw - 32px));
+        }
+        .text {
+          padding: 16px;
+        }
+        .files {
+          padding-inline: 16px;
+        }
+        .file {
+          min-inline-size: 0;
+          overflow-wrap: anywhere;
+        }
+        .foot {
+          flex-wrap: wrap;
+          padding: 16px;
+        }
+        .foot .primary,
+        .foot .secondary {
+          flex: 1 1 auto;
+        }
+        .times {
+          margin-inline: 16px;
+          padding: 16px;
+        }
+        .times ul {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .error {
+          margin-inline: 16px;
+        }
+        select {
+          block-size: 44px;
+        }
+      }
     `,
   ];
 

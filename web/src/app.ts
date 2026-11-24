@@ -22,9 +22,13 @@ export class OrtusMailApp extends LitElement {
     }
     .toast {
       position: fixed;
-      inset-block-end: 24px;
+      /* Above the shell's bar along the bottom of a phone. */
+      inset-block-end: calc(100dvh - var(--ortus-screen, 100dvh) + 24px);
       inset-inline-start: 50%;
       translate: -50% 0;
+      box-sizing: border-box;
+      inline-size: max-content;
+      max-inline-size: calc(100vw - 16px);
       display: flex;
       align-items: center;
       gap: 14px;
@@ -54,6 +58,12 @@ export class OrtusMailApp extends LitElement {
       font: inherit;
       font-size: 14px;
       cursor: pointer;
+      flex: none;
+    }
+    @media (max-width: 720px) {
+      .toast button {
+        block-size: 44px;
+      }
     }
   `;
 

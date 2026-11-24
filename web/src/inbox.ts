@@ -11,6 +11,7 @@ const ICON_ARCHIVE = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="n
 const ICON_TRASH = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>`;
 const ICON_SEARCH = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>`;
 const ICON_CLOCK = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>`;
+const ICON_BACK = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg>`;
 const ICON_SEND = svg`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>`;
 
 const FOLDERS: { role: string; key: MailKey; count: "unread" | "total" | null }[] = [
@@ -784,17 +785,142 @@ export class OrtusMailInbox extends LitElement {
           display: none;
         }
       }
+      .back {
+        display: none;
+      }
       @media (max-width: 960px) {
         .top,
         .columns {
           grid-template-columns: minmax(0, 1fr);
         }
-        .top > .brand,
+        .top > .brand {
+          display: none;
+        }
+        /* The folders are a strip that scrolls sideways above the list. */
         nav.folders {
+          flex-direction: row;
+          align-items: center;
+          gap: 6px;
+          min-inline-size: 0;
+          overflow-x: auto;
+          scrollbar-width: none;
+        }
+        nav.folders > * {
+          flex: none;
+        }
+        nav.folders .new {
+          margin-block-end: 0;
+        }
+        nav.folders .folder {
+          gap: 8px;
+          block-size: 44px;
+        }
+        .labels-head {
           display: none;
         }
         .reader {
           padding: 20px;
+        }
+      }
+      /* A phone: the list, or the thread with a way back to it. */
+      @media (max-width: 720px) {
+        .top {
+          padding-inline: 16px;
+        }
+        .columns {
+          padding-block: 12px 20px;
+          padding-inline: 16px;
+          gap: 12px;
+        }
+        .columns.reading nav.folders,
+        .columns.reading .list,
+        .columns:not(.reading) .reader {
+          display: none;
+        }
+        .back {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          block-size: 44px;
+          margin-block: -8px 8px;
+          margin-inline: -8px 0;
+          padding-inline: 8px 12px;
+          border: 0;
+          border-radius: 10px;
+          background: none;
+          color: var(--ortus-text);
+          font: inherit;
+          font-size: 15px;
+          cursor: pointer;
+        }
+        :host(:dir(rtl)) .back svg {
+          scale: -1 1;
+        }
+        .reader {
+          padding: 16px;
+          border-radius: 14px;
+        }
+        .reader .title {
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .reader h2 {
+          font-size: 20px;
+          flex: 1 1 100%;
+        }
+        .actions {
+          flex-wrap: wrap;
+        }
+        .icon,
+        .send {
+          inline-size: 44px;
+          block-size: 44px;
+        }
+        .tab {
+          block-size: 44px;
+        }
+        .item {
+          padding: 10px 8px;
+          gap: 2px 12px;
+        }
+        .chip {
+          max-inline-size: 120px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          vertical-align: middle;
+        }
+        .menu button {
+          min-block-size: 44px;
+          align-items: center;
+        }
+        .banner,
+        .invite .answers,
+        .meta {
+          flex-wrap: wrap;
+        }
+        .sender .address {
+          display: block;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .filebox {
+          flex-wrap: wrap;
+          max-inline-size: 100%;
+        }
+        .file {
+          min-inline-size: 0;
+          overflow-wrap: anywhere;
+        }
+        .filebox .save {
+          block-size: 44px;
+        }
+        .reply {
+          padding-inline: 14px 6px;
+          padding-block: 6px;
+        }
+        .catchup {
+          padding: 16px;
         }
       }
     `,
@@ -1080,7 +1206,7 @@ export class OrtusMailInbox extends LitElement {
           <input id="q" name="q" type="search" .value=${this.place.q} placeholder=${t(this.localize, "searchMail")} autocomplete="off" />
         </form>
       </div>
-      <div class="columns">
+      <div class="columns ${this.place.thread ? "reading" : ""}">
         ${this.folders()}
         <section class="list" aria-labelledby="list-title">
           <h1 id="list-title" class="sr">${this.folderTitle()}</h1>
@@ -1210,10 +1336,16 @@ export class OrtusMailInbox extends LitElement {
     </ul>`;
   }
 
+  /** Back to the list: shown only on a phone, where the thread fills the screen. */
+  private backButton() {
+    return html`<button class="back" type="button" @click=${() => this.go({ thread: null })}>${ICON_BACK}${t(this.localize, "back")}</button>`;
+  }
+
   private reader() {
     const thread = this.thread;
     if (!thread?.length) {
       return html`<section class="reader" aria-label=${t(this.localize, "reading")}>
+        ${this.backButton()}
         <p class="quiet">${t(this.localize, "nothingSelected")}</p>
       </section>`;
     }
@@ -1223,6 +1355,7 @@ export class OrtusMailInbox extends LitElement {
     const inTrash = Boolean(this.boxId("trash") && last.mailboxIds[this.boxId("trash")!]);
     return html`
       <section class="reader" aria-labelledby="thread-title">
+        ${this.backButton()}
         <div class="title">
           <h2 id="thread-title" dir="auto">${last.subject || t(this.localize, "noSubject")}</h2>
           <div class="actions">

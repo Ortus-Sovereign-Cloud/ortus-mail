@@ -237,6 +237,15 @@ export class OrtusMailMigrations extends LitElement {
           grid-template-columns: minmax(0, 1fr);
         }
       }
+      /* A phone: a table scrolls sideways in its own box. */
+      @media (max-width: 720px) {
+        table {
+          display: block;
+          overflow-x: auto;
+          /* Hidden labels in it stay in its box. */
+          position: relative;
+        }
+      }
     `,
   ];
 

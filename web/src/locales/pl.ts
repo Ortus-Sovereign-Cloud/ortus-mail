@@ -104,6 +104,7 @@ const messages: Record<MailKey, MailMessage> = {
   "noSubject": "(bez tematu)",
   "reading": "Czytanie",
   "nothingSelected": "Wybierz wiadomość, aby ją przeczytać.",
+  "back": "Wstecz",
   "archiveIt": "Archiwizuj",
   "deleteForever": "Usuń na zawsze",
   "moveToTrash": "Przenieś do kosza",
