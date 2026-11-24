@@ -382,9 +382,9 @@ pub async fn list(instance: &Instance) -> StoreResult<Vec<Import>> {
     let mut out = Vec::new();
     for r in store.query("SELECT id, host, port, security, created_at FROM mail_imports ORDER BY created_at DESC", &[]).await? {
         let id = r.text(0).unwrap_or_default().to_string();
-        let accounts = store
+        let mut accounts: Vec<Account> = store
             .query(
-                "SELECT a.id, a.login, COALESCE(u.email, a.target_user), a.state, a.error, a.copied, a.updated_at FROM mail_import_accounts a LEFT JOIN core_users u ON u.id = a.target_user WHERE a.import_id = $1 ORDER BY a.login",
+                "SELECT id, login, target_user, state, error, copied, updated_at FROM mail_import_accounts WHERE import_id = $1 ORDER BY login",
                 &[id.as_str().into()],
             )
             .await?
@@ -399,6 +399,12 @@ pub async fn list(instance: &Instance) -> StoreResult<Vec<Import>> {
                 updated_at: a.int(6).unwrap_or(0),
             })
             .collect();
+        // Each account is shown by its person's address, once they have one.
+        for account in &mut accounts {
+            if let Some(user) = ortus_core::auth::accounts::by_id(store, &account.target).await? {
+                account.target = user.email;
+            }
+        }
         out.push(Import { id, host: r.text(1).unwrap_or_default().into(), port: r.int(2).unwrap_or(0), security: r.text(3).unwrap_or_default().into(), created_at: r.int(4).unwrap_or(0), accounts });
     }
     Ok(out)

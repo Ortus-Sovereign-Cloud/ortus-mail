@@ -814,16 +814,54 @@ pub fn message_of_blob(blob: &str) -> Option<&str> {
 /// Mail stored before the search index: put in it, some at a time.
 pub const INDEX_JOB: &str = "mail.index";
 
+/// Where the backlog's last look ended (received time and id), newest
+/// first; `None` starts from the newest again.
+static BACKLOG_AT: std::sync::Mutex<Option<(i64, String)>> = std::sync::Mutex::new(None);
+
 pub async fn index_backlog(instance: &Instance) -> Result<(), String> {
-    let rows = instance
-        .store
-        .query(
-            "SELECT m.id, m.user_id, m.thread_id, m.blob FROM mail_messages m WHERE NOT EXISTS (SELECT 1 FROM core_search s WHERE s.app = 'mail' AND s.id = m.id) ORDER BY m.received_at DESC LIMIT 300",
-            &[],
-        )
-        .await
+    // A page at a time, asking the core which are not in its index yet:
+    // up to 300 indexed and 20 pages looked through each run, going on
+    // from where the last run stopped, round again from the newest.
+    let mut rows = Vec::new();
+    for _ in 0..20 {
+        let at = BACKLOG_AT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let page = match &at {
+            None => instance.store.query("SELECT id, user_id, thread_id, blob, received_at FROM mail_messages ORDER BY received_at DESC, id DESC LIMIT 500", &[]).await,
+            Some((when, id)) => instance.store.query("SELECT id, user_id, thread_id, blob, received_at FROM mail_messages WHERE received_at < $1 OR (received_at = $1 AND id < $2) ORDER BY received_at DESC, id DESC LIMIT 500", &[(*when).into(), id.as_str().into()]).await,
+        }
         .map_err(|e| e.to_string())?;
-    for r in rows {
+        let next = page.last().map(|r| {
+            (
+                r.int(4).unwrap_or(0),
+                r.text(0).unwrap_or_default().to_string(),
+            )
+        });
+        *BACKLOG_AT.lock().unwrap_or_else(|e| e.into_inner()) =
+            if page.len() < 500 { None } else { next };
+        let ids: Vec<String> = page
+            .iter()
+            .filter_map(|r| r.text(0).map(str::to_string))
+            .collect();
+        let missing: std::collections::HashSet<String> =
+            ortus_core::search::missing(instance.store.as_ref(), "mail", &ids)
+                .await
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .collect();
+        rows.extend(
+            page.into_iter()
+                .filter(|r| r.text(0).is_some_and(|id| missing.contains(id))),
+        );
+        if rows.len() >= 300
+            || BACKLOG_AT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        {
+            break;
+        }
+    }
+    for r in rows.into_iter().take(300) {
         let (id, user, thread, blob) = (
             r.text(0).unwrap_or_default(),
             r.text(1).unwrap_or_default(),
@@ -1018,15 +1056,7 @@ pub async fn recipient(store: &dyn AsyncStore, address: &str) -> StoreResult<Opt
     if !ours {
         return Ok(None);
     }
-    Ok(store
-        .query(
-            "SELECT id FROM core_users WHERE email = $1 AND state <> 'unverified'",
-            &[address.as_str().into()],
-        )
-        .await?
-        .first()
-        .and_then(|r| r.text(0))
-        .map(str::to_string))
+    ortus_core::people::id_by_email(store, &address).await
 }
 
 /// Whether a domain is one of ours.
@@ -1432,15 +1462,9 @@ pub async fn remove_message(instance: &Instance, user_id: &str, message: &str) -
 /// How many more bytes of mail a person may keep: `None` when they have
 /// no quota.
 pub async fn quota_left(store: &dyn AsyncStore, user_id: &str) -> StoreResult<Option<i64>> {
-    let quota = store
-        .query(
-            "SELECT quota_bytes FROM core_users WHERE id = $1",
-            &[user_id.into()],
-        )
-        .await?
-        .first()
-        .and_then(|r| r.int(0));
-    let Some(quota) = quota else { return Ok(None) };
+    let Some(quota) = ortus_core::people::quota(store, user_id).await? else {
+        return Ok(None);
+    };
     Ok(Some(quota - usage(store, user_id).await?))
 }
 

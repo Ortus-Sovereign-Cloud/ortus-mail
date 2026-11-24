@@ -52,16 +52,9 @@ async fn people(request: &Request, ortus: &Arc<Instance>) -> Result<Response, Ap
     let store = ortus.store.as_ref();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for row in store
-        .query(
-            "SELECT name, email FROM core_users WHERE state IN ('active', 'invited') AND (LOWER(name) LIKE $1 OR LOWER(email) LIKE $1) ORDER BY name LIMIT 8",
-            &[like.as_str().into()],
-        )
-        .await?
-    {
-        let email = row.text(1).unwrap_or_default().to_string();
-        if seen.insert(email.clone()) {
-            out.push(json!({"name": row.text(0), "email": email, "here": true}));
+    for person in ortus_core::people::find(store, q, None, true, 8).await? {
+        if seen.insert(person.email.clone()) {
+            out.push(json!({"name": person.name, "email": person.email, "here": true}));
         }
     }
     for row in store

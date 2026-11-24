@@ -135,12 +135,12 @@ async fn catch_up(request: &Request, instance: &Arc<Instance>) -> Result<Respons
             reply.push(json!({"id": id, "from": if name.is_empty() { from.clone() } else { name.to_string() }, "subject": subject}));
         }
     }
-    let alerts: Vec<Value> = s
-        .query("SELECT title, path, at FROM core_notifications WHERE user_id = $1 AND kind = 'alert' AND at > $2 ORDER BY at DESC LIMIT 5", &[me.id.as_str().into(), since.into()])
-        .await?
-        .iter()
-        .map(|r| json!({"title": r.text(0), "path": r.text(1), "at": r.int(2)}))
-        .collect();
+    let alerts: Vec<Value> =
+        ortus_core::notify::recent(s, &me.id, ortus_core::notify::Kind::Alert, since, 5)
+            .await?
+            .into_iter()
+            .map(|n| json!({"title": n.title, "path": n.path, "at": n.at}))
+            .collect();
     Ok(ok(
         &json!({"since": since, "reply": reply, "invites": invites, "alerts": alerts}),
     ))
