@@ -89,6 +89,17 @@ test.describe("flows", () => {
     await page.goto("/mail?tab=other");
     await inbox(page).getByRole("button", { name: /River Authority/ }).click();
     const reader = inbox(page).getByRole("region", { name: "Gauge at the bridge passed 4.2 m" });
+    // By keyboard: the menu takes focus, arrows move, Escape closes it
+    // back to its button.
+    await reader.getByRole("button", { name: en.snooze }).focus();
+    await page.keyboard.press("Enter");
+    const items = reader.getByRole("menuitem");
+    await expect(items.first()).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(items.nth(1)).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(reader.getByRole("menu")).toHaveCount(0);
+    await expect(reader.getByRole("button", { name: en.snooze })).toBeFocused();
     await reader.getByRole("button", { name: en.snooze }).click();
     await reader.getByRole("menuitem", { name: new RegExp(en.tomorrow) }).click();
     await expect(inbox(page).getByRole("button", { name: /River Authority/ })).toHaveCount(0);

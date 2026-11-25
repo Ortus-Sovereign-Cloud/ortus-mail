@@ -944,6 +944,29 @@ export class OrtusMailInbox extends LitElement {
   @state() private sending = false;
   @state() private scheduled: { id: string; emailId: string; sendAt: string; ortusState: string; ortusError: string | null }[] = [];
   @state() private snoozeOpen = false;
+
+  /** The snooze menu: arrows move, Escape closes it back to its button. */
+  private snoozeKeys(event: KeyboardEvent): void {
+    const menu = event.currentTarget as HTMLElement;
+    const items = [...menu.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this.snoozeOpen = false;
+      menu.parentElement?.querySelector<HTMLElement>("button[aria-haspopup]")?.focus();
+      return;
+    }
+    const at = items.indexOf(event.composedPath()[0] as HTMLElement);
+    const to = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: items.length - 1 }[event.key];
+    if (to === undefined || !items.length) return;
+    event.preventDefault();
+    items[(to + items.length) % items.length]?.focus();
+  }
+
+  protected override updated(changed: Map<PropertyKey, unknown>): void {
+    super.updated?.(changed);
+    // The snooze menu that just opened puts focus on its first time.
+    if (changed.has("snoozeOpen") && this.snoozeOpen) this.renderRoot.querySelector<HTMLElement>('.snooze [role="menuitem"]')?.focus();
+  }
   /** Today's events, from the calendar (null: no calendar app). */
   @state() private agenda: AgendaItem[] | null = null;
   @state() private now = Date.now();
@@ -1362,7 +1385,7 @@ export class OrtusMailInbox extends LitElement {
             <div class="snooze">
               <button class="icon" aria-label=${t(this.localize, "snooze")} title=${t(this.localize, "snooze")} aria-haspopup="menu" aria-expanded=${this.snoozeOpen ? "true" : "false"} @click=${() => (this.snoozeOpen = !this.snoozeOpen)}>${ICON_CLOCK}</button>
               ${this.snoozeOpen
-                ? html`<div class="menu" role="menu" aria-label=${t(this.localize, "snooze")}>
+                ? html`<div class="menu" role="menu" aria-label=${t(this.localize, "snooze")} @keydown=${this.snoozeKeys}>
                     ${snoozeTimes().map((s) => html`<button role="menuitem" @click=${() => this.snooze(s.at)}>${t(this.localize, s.key)}<small>${this.when(s.at.toISOString())}</small></button>`)}
                   </div>`
                 : nothing}
