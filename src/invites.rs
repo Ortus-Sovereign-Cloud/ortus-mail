@@ -322,10 +322,7 @@ async fn save_to_drive(request: &Request, instance: &Arc<Instance>) -> Result<Re
         .get::<dyn ortus_core::interfaces::Drive>(&instance.switches)
         .await
         .map_err(|_| ApiError::not_installed("drive"))?;
-    let ctx = crate::jmap::Ctx {
-        instance,
-        user: &me.user,
-    };
+    let ctx = crate::jmap::Ctx::new(instance, &me.user);
     let bytes = crate::jmap::blob_bytes(&ctx, &input.blob_id)
         .await
         .ok_or_else(|| ApiError::not_found("There is no such attachment."))?;

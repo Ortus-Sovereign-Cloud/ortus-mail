@@ -87,11 +87,43 @@ type Answer = Result<Value, MethodError>;
 pub(crate) struct Ctx<'a> {
     pub(crate) instance: &'a Arc<Instance>,
     pub(crate) user: &'a User,
+    /// The mail's state, read once per request and again after a write.
+    known: std::sync::Mutex<Option<String>>,
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
+    pub(crate) fn new(instance: &'a Arc<Instance>, user: &'a User) -> Self {
+        Self {
+            instance,
+            user,
+            known: std::sync::Mutex::new(None),
+        }
+    }
+
     fn store(&self) -> &dyn ortus_core::storage::AsyncStore {
         self.instance.store.as_ref()
+    }
+
+    /// The state of this person's mail: read once for the whole request
+    /// (every method answers with it), and again after a write.
+    async fn state(&self) -> Result<String, ortus_core::storage::StoreError> {
+        if let Some(known) = self.known.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            return Ok(known);
+        }
+        let now = state(self.instance, &self.user.id).await?;
+        *self.known.lock().unwrap_or_else(|p| p.into_inner()) = Some(now.clone());
+        Ok(now)
+    }
+
+    /// The state after this request's write.
+    async fn new_state(&self) -> Result<String, ortus_core::storage::StoreError> {
+        self.changed();
+        self.state().await
+    }
+
+    /// Something changed: the state is read again when next asked.
+    fn changed(&self) {
+        *self.known.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 }
 
@@ -103,22 +135,17 @@ pub async fn state(
 ) -> Result<String, ortus_core::storage::StoreError> {
     use std::hash::{Hash, Hasher};
     let store = instance.store.as_ref();
-    store::mailboxes(store, user_id).await?;
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    for r in store
-        .query(
-            "SELECT id, name, modseq, uid_next FROM mail_mailboxes WHERE user_id = $1 ORDER BY id",
-            &[user_id.into()],
-        )
-        .await?
-    {
-        (r.text(0), r.text(1), r.int(2), r.int(3)).hash(&mut h);
+    // Each folder: its name, sequences and how many messages it holds.
+    const FOLDERS: &str = "SELECT b.id, b.name, b.modseq, b.uid_next, (SELECT CAST(COUNT(*) AS BIGINT) FROM mail_entries e WHERE e.mailbox_id = b.id) FROM mail_mailboxes b WHERE b.user_id = $1 ORDER BY b.id";
+    let mut folders = store.query(FOLDERS, &[user_id.into()]).await?;
+    if folders.is_empty() {
+        // A first visit: the folders are made, then read.
+        store::mailboxes(store, user_id).await?;
+        folders = store.query(FOLDERS, &[user_id.into()]).await?;
     }
-    for r in store
-        .query("SELECT CAST(COUNT(*) AS BIGINT) FROM mail_entries e JOIN mail_mailboxes m ON m.id = e.mailbox_id WHERE m.user_id = $1", &[user_id.into()])
-        .await?
-    {
-        r.int(0).hash(&mut h);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for r in folders {
+        (r.text(0), r.text(1), r.int(2), r.int(3), r.int(4)).hash(&mut h);
     }
     for r in store
         .query(
@@ -197,7 +224,7 @@ async fn mailbox_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
     }
     let list = only_properties(list, args);
     Ok(
-        json!({"accountId": ctx.user.id, "state": state(ctx.instance, &ctx.user.id).await?, "list": list, "notFound": not_found}),
+        json!({"accountId": ctx.user.id, "state": ctx.state().await?, "list": list, "notFound": not_found}),
     )
 }
 
@@ -205,7 +232,7 @@ async fn mailbox_query(ctx: &Ctx<'_>, _args: &Value) -> Answer {
     let boxes = store::mailboxes(ctx.store(), &ctx.user.id).await?;
     let ids: Vec<&str> = boxes.iter().map(|m| m.id.as_str()).collect();
     Ok(
-        json!({"accountId": ctx.user.id, "queryState": state(ctx.instance, &ctx.user.id).await?, "canCalculateChanges": false, "position": 0, "ids": ids, "total": ids.len()}),
+        json!({"accountId": ctx.user.id, "queryState": ctx.state().await?, "canCalculateChanges": false, "position": 0, "ids": ids, "total": ids.len()}),
     )
 }
 
@@ -214,7 +241,7 @@ async fn mailbox_set(
     args: &Value,
     created_ids: &mut HashMap<String, String>,
 ) -> Answer {
-    let old_state = state(ctx.instance, &ctx.user.id).await?;
+    let old_state = ctx.state().await?;
     check_if_in_state(args, &old_state)?;
     let mut created = Map::new();
     let mut not_created = Map::new();
@@ -313,7 +340,7 @@ async fn mailbox_set(
         }
     }
     Ok(
-        json!({"accountId": ctx.user.id, "oldState": old_state, "newState": state(ctx.instance, &ctx.user.id).await?,
+        json!({"accountId": ctx.user.id, "oldState": old_state, "newState": ctx.new_state().await?,
         "created": created, "notCreated": not_created, "updated": updated, "notUpdated": not_updated, "destroyed": destroyed, "notDestroyed": not_destroyed}),
     )
 }
@@ -732,7 +759,7 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
         .filter(|id| !found.iter().any(|s| &s.id == *id))
         .collect();
     Ok(
-        json!({"accountId": ctx.user.id, "state": state(ctx.instance, &ctx.user.id).await?, "list": list, "notFound": not_found}),
+        json!({"accountId": ctx.user.id, "state": ctx.state().await?, "list": list, "notFound": not_found}),
     )
 }
 
@@ -911,7 +938,7 @@ async fn email_query(ctx: &Ctx<'_>, args: &Value) -> Answer {
         .map_or(100, |l| (l as usize).min(MAX_OBJECTS));
     let page: Vec<&String> = hits.iter().skip(position as usize).take(limit).collect();
     Ok(
-        json!({"accountId": ctx.user.id, "queryState": state(ctx.instance, &ctx.user.id).await?, "canCalculateChanges": false, "position": position, "ids": page, "total": total, "limit": limit}),
+        json!({"accountId": ctx.user.id, "queryState": ctx.state().await?, "canCalculateChanges": false, "position": position, "ids": page, "total": total, "limit": limit}),
     )
 }
 
@@ -1385,7 +1412,7 @@ async fn email_set(
     args: &Value,
     created_ids: &mut HashMap<String, String>,
 ) -> Answer {
-    let old_state = state(ctx.instance, &ctx.user.id).await?;
+    let old_state = ctx.state().await?;
     check_if_in_state(args, &old_state)?;
     let boxes = store::mailboxes(ctx.store(), &ctx.user.id).await?;
     let mut created = Map::new();
@@ -1472,7 +1499,7 @@ async fn email_set(
         }
     }
     Ok(
-        json!({"accountId": ctx.user.id, "oldState": old_state, "newState": state(ctx.instance, &ctx.user.id).await?,
+        json!({"accountId": ctx.user.id, "oldState": old_state, "newState": ctx.new_state().await?,
         "created": created, "notCreated": not_created, "updated": updated, "notUpdated": not_updated, "destroyed": destroyed, "notDestroyed": not_destroyed}),
     )
 }
@@ -1482,7 +1509,7 @@ async fn email_import(
     args: &Value,
     created_ids: &mut HashMap<String, String>,
 ) -> Answer {
-    let old_state = state(ctx.instance, &ctx.user.id).await?;
+    let old_state = ctx.state().await?;
     check_if_in_state(args, &old_state)?;
     let boxes = store::mailboxes(ctx.store(), &ctx.user.id).await?;
     let mut created = Map::new();
@@ -1549,7 +1576,7 @@ async fn email_import(
         }
     }
     Ok(
-        json!({"accountId": ctx.user.id, "oldState": old_state, "newState": state(ctx.instance, &ctx.user.id).await?, "created": created, "notCreated": not_created}),
+        json!({"accountId": ctx.user.id, "oldState": old_state, "newState": ctx.new_state().await?, "created": created, "notCreated": not_created}),
     )
 }
 
@@ -1575,7 +1602,7 @@ async fn thread_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
         }
     }
     Ok(
-        json!({"accountId": ctx.user.id, "state": state(ctx.instance, &ctx.user.id).await?, "list": list, "notFound": not_found}),
+        json!({"accountId": ctx.user.id, "state": ctx.state().await?, "list": list, "notFound": not_found}),
     )
 }
 
@@ -1626,7 +1653,7 @@ async fn submission_set(
     created_ids: &mut HashMap<String, String>,
     follow_up: &mut Vec<(String, Value)>,
 ) -> Answer {
-    let old_state = state(ctx.instance, &ctx.user.id).await?;
+    let old_state = ctx.state().await?;
     let mine = identities(ctx).await?;
     let mut created = Map::new();
     let mut not_created = Map::new();
@@ -1733,7 +1760,7 @@ async fn submission_set(
         }
     }
     Ok(
-        json!({"accountId": ctx.user.id, "oldState": old_state, "newState": state(ctx.instance, &ctx.user.id).await?, "created": created, "notCreated": not_created, "updated": updated, "notUpdated": not_updated, "destroyed": []}),
+        json!({"accountId": ctx.user.id, "oldState": old_state, "newState": ctx.new_state().await?, "created": created, "notCreated": not_created, "updated": updated, "notUpdated": not_updated, "destroyed": []}),
     )
 }
 
@@ -1787,7 +1814,7 @@ async fn submission_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
         }
     }
     Ok(
-        json!({"accountId": ctx.user.id, "state": state(ctx.instance, &ctx.user.id).await?, "list": list, "notFound": not_found}),
+        json!({"accountId": ctx.user.id, "state": ctx.state().await?, "list": list, "notFound": not_found}),
     )
 }
 
@@ -1803,7 +1830,7 @@ async fn submission_query(ctx: &Ctx<'_>, args: &Value) -> Answer {
         .map(|s| s.id.clone())
         .collect();
     Ok(
-        json!({"accountId": ctx.user.id, "queryState": state(ctx.instance, &ctx.user.id).await?, "canCalculateChanges": false, "position": 0, "ids": ids, "total": ids.len()}),
+        json!({"accountId": ctx.user.id, "queryState": ctx.state().await?, "canCalculateChanges": false, "position": 0, "ids": ids, "total": ids.len()}),
     )
 }
 
@@ -1812,7 +1839,7 @@ async fn changes(ctx: &Ctx<'_>, args: &Value, kind: &str) -> Answer {
         .get("sinceState")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let now = state(ctx.instance, &ctx.user.id).await?;
+    let now = ctx.state().await?;
     if since != now {
         return Err(MethodError("cannotCalculateChanges", None));
     }
@@ -1941,23 +1968,42 @@ async fn call(
             return Err(MethodError("accountNotFound", None));
         }
     }
+    if name.ends_with("/set") || name.ends_with("/import") {
+        // A write, whole or partial: the next method reads the state again.
+        let answer = Box::pin(write(ctx, name, args, created_ids, follow_up)).await;
+        ctx.changed();
+        return answer;
+    }
     match name {
         "Core/echo" => Ok(args.clone()),
         "Mailbox/get" => mailbox_get(ctx, args).await,
         "Mailbox/query" => mailbox_query(ctx, args).await,
         "Mailbox/changes" => changes(ctx, args, "Mailbox").await,
-        "Mailbox/set" => mailbox_set(ctx, args, created_ids).await,
         "Email/get" => email_get(ctx, args).await,
         "Email/query" => email_query(ctx, args).await,
         "Email/changes" => changes(ctx, args, "Email").await,
-        "Email/set" => email_set(ctx, args, created_ids).await,
-        "Email/import" => email_import(ctx, args, created_ids).await,
         "Thread/get" => thread_get(ctx, args).await,
         "Thread/changes" => changes(ctx, args, "Thread").await,
         "Identity/get" => identity_get(ctx, args).await,
-        "EmailSubmission/set" => submission_set(ctx, args, created_ids, follow_up).await,
         "EmailSubmission/get" => submission_get(ctx, args).await,
         "EmailSubmission/query" => submission_query(ctx, args).await,
+        _ => Err(MethodError("unknownMethod", None)),
+    }
+}
+
+/// The methods that write.
+async fn write(
+    ctx: &Ctx<'_>,
+    name: &str,
+    args: &Value,
+    created_ids: &mut HashMap<String, String>,
+    follow_up: &mut Vec<(String, Value)>,
+) -> Answer {
+    match name {
+        "Mailbox/set" => mailbox_set(ctx, args, created_ids).await,
+        "Email/set" => email_set(ctx, args, created_ids).await,
+        "Email/import" => email_import(ctx, args, created_ids).await,
+        "EmailSubmission/set" => submission_set(ctx, args, created_ids, follow_up).await,
         _ => Err(MethodError("unknownMethod", None)),
     }
 }
@@ -1986,7 +2032,7 @@ pub async fn run(
     if calls.len() > MAX_CALLS {
         return Err(problem("limit", "maxCallsInRequest"));
     }
-    let ctx = Ctx { instance, user };
+    let ctx = Ctx::new(instance, user);
     let mut created_ids: HashMap<String, String> = request
         .get("createdIds")
         .and_then(Value::as_object)
@@ -2220,7 +2266,7 @@ async fn download(
     blob: &str,
     name: &str,
 ) -> Result<Response, ApiError> {
-    let ctx = Ctx { instance, user };
+    let ctx = Ctx::new(instance, user);
     let data = blob_bytes(&ctx, blob)
         .await
         .ok_or_else(|| ApiError::not_found("There is no such blob."))?;
