@@ -351,6 +351,8 @@ struct Stored {
     keywords: Vec<String>,
     category: String,
     verified: bool,
+    /// From, To and whether there is an invitation, when kept at delivery.
+    heads: Option<Value>,
 }
 
 /// Whether the sender is who they say: mail from inside the installation,
@@ -372,7 +374,7 @@ async fn stored(ctx: &Ctx<'_>, ids: &[String]) -> Result<Vec<Stored>, MethodErro
         for r in ctx
             .store()
             .query(
-                &format!("SELECT id, thread_id, blob, size, received_at, subject, preview, attachments, category, auth FROM mail_messages WHERE user_id = $1 AND id IN ({list})"),
+                &format!("SELECT id, thread_id, blob, size, received_at, subject, preview, attachments, category, auth, heads FROM mail_messages WHERE user_id = $1 AND id IN ({list})"),
                 &values,
             )
             .await?
@@ -418,6 +420,7 @@ async fn stored(ctx: &Ctx<'_>, ids: &[String]) -> Result<Vec<Stored>, MethodErro
             attachments: r.int(7).unwrap_or(0),
             category: r.text(8).unwrap_or("important").into(),
             verified: verified(r.text(9)),
+            heads: r.text(10).and_then(|h| serde_json::from_str(h).ok()),
             mailboxes: entries
                 .iter()
                 .map(|e| {
@@ -441,7 +444,7 @@ fn utc(ms: i64) -> String {
     )
 }
 
-fn addresses(list: Option<mail_parser::AddressList<'_>>) -> Value {
+pub(crate) fn addresses(list: Option<mail_parser::AddressList<'_>>) -> Value {
     match list {
         None => Value::Null,
         Some(list) => Value::Array(
@@ -492,7 +495,7 @@ async fn stored_all(ctx: &Ctx<'_>) -> Result<Vec<Stored>, MethodError> {
     let mut out = Vec::new();
     for r in ctx
         .store()
-        .query("SELECT id, thread_id, blob, size, received_at, subject, preview, attachments, category, auth FROM mail_messages WHERE user_id = $1 ORDER BY received_at DESC, id", &[user.into()])
+        .query("SELECT id, thread_id, blob, size, received_at, subject, preview, attachments, category, auth, heads FROM mail_messages WHERE user_id = $1 ORDER BY received_at DESC, id", &[user.into()])
         .await?
     {
         let id = r.text(0).unwrap_or_default().to_string();
@@ -508,6 +511,7 @@ async fn stored_all(ctx: &Ctx<'_>) -> Result<Vec<Stored>, MethodError> {
             attachments: r.int(7).unwrap_or(0),
             category: r.text(8).unwrap_or("important").into(),
             verified: verified(r.text(9)),
+            heads: r.text(10).and_then(|h| serde_json::from_str(h).ok()),
             mailboxes,
             keywords,
         });
@@ -548,7 +552,7 @@ const FILES_AT_ONCE: usize = 16;
 /// The stored files of `found` (at most [`FILES_AT_ONCE`]), in order,
 /// read at the same time (an inbox page from S3 one by one waited a round
 /// trip per message).
-async fn files_of(ctx: &Ctx<'_>, found: &[Stored]) -> Vec<Vec<u8>> {
+async fn files_of(ctx: &Ctx<'_>, found: &[&Stored]) -> Vec<Vec<u8>> {
     let mut out = vec![Vec::new(); found.len()];
     let mut reading = tokio::task::JoinSet::new();
     for (index, s) in found.iter().enumerate() {
@@ -605,6 +609,33 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
         )
     });
     let found = stored(ctx, &ids).await?;
+    // From, To and the invitation come from what was kept at delivery; a
+    // message's file is read only for the rest (or an invitation, or an
+    // older message that has nothing kept).
+    let file_for = |s: &Stored| {
+        needs_file
+            && properties.iter().any(|p| match (p.as_str(), &s.heads) {
+                ("from" | "to", Some(_)) => false,
+                ("ortusInvite", Some(h)) => h["invite"] == json!(true),
+                (p, _) => !matches!(
+                    p,
+                    "id" | "blobId"
+                        | "threadId"
+                        | "mailboxIds"
+                        | "keywords"
+                        | "size"
+                        | "receivedAt"
+                        | "subject"
+                        | "preview"
+                        | "hasAttachment"
+                        | "ortusCategory"
+                        | "ortusVerified"
+                        | "ortusSnoozedUntil"
+                        | "ortusDelivery"
+                ),
+            })
+    };
+    let reads: Vec<bool> = found.iter().map(file_for).collect();
     // The files are read a window at a time (several at once), and each
     // window is let go before the next: never the whole page in memory.
     let mut raws: Vec<Vec<u8>> = Vec::new();
@@ -620,14 +651,27 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
         email.insert("id".into(), json!(s.id));
         if needs_file && index % FILES_AT_ONCE == 0 {
             let end = (index + FILES_AT_ONCE).min(found.len());
-            raws = files_of(ctx, &found[index..end]).await;
+            let window: Vec<&Stored> = (index..end)
+                .filter(|&i| reads[i])
+                .map(|i| &found[i])
+                .collect();
+            let mut read = files_of(ctx, &window).await.into_iter();
+            raws = (index..end)
+                .map(|i| {
+                    if reads[i] {
+                        read.next().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect();
         }
-        let raw = if needs_file {
+        let raw = if reads[index] {
             std::mem::take(&mut raws[index % FILES_AT_ONCE])
         } else {
             Vec::new()
         };
-        let parsed = if needs_file {
+        let parsed = if reads[index] {
             MessageParser::default().parse(&raw)
         } else {
             None
@@ -656,6 +700,11 @@ async fn email_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
                 "hasAttachment" => json!(s.attachments > 0),
                 "ortusCategory" => json!(s.category),
                 "ortusVerified" => json!(s.verified),
+                "from" | "to" if !reads[index] && s.heads.is_some() => s
+                    .heads
+                    .as_ref()
+                    .map_or(Value::Null, |h| h[p.as_str()].clone()),
+                "ortusInvite" if !reads[index] => Value::Null,
                 "ortusInvite" => crate::invites::shown(ctx.instance, &ctx.user.id, &raw)
                     .await
                     .unwrap_or(Value::Null),

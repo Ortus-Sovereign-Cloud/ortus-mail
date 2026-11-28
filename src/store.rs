@@ -218,6 +218,14 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "delivery notices",
         sql: "ALTER TABLE mail_outbound ADD COLUMN told TEXT",
     },
+    // From, To and whether there is an invitation, so an inbox page does
+    // not read and parse each message's file (empty for older messages,
+    // which are still read).
+    Migration {
+        version: 11,
+        name: "what a list shows",
+        sql: "ALTER TABLE mail_messages ADD COLUMN heads TEXT",
+    },
 ];
 
 /// How each recipient of a message one sent is getting it: state (queued,
@@ -372,6 +380,10 @@ pub struct Summary {
     /// The inbox tab: `important` (from people), `feeds` (lists and
     /// newsletters) or `other` (sent by machines).
     pub category: String,
+    /// What a list shows that is not in the columns above, so a list does
+    /// not read every file: `{"from", "to"}` as JMAP has them, and whether
+    /// there is a calendar invitation. None: read the file.
+    pub heads: Option<String>,
 }
 
 /// The inbox tab of a message, from its headers.
@@ -459,6 +471,14 @@ pub fn summarise(raw: &[u8]) -> Summary {
             .unwrap_or_default(),
         attachments,
         category: category_of(&message).to_string(),
+        heads: Some(
+            json!({
+                "from": crate::jmap::addresses(message.from()),
+                "to": crate::jmap::addresses(message.to()),
+                "invite": crate::invites::calendar_of(&message).is_some(),
+            })
+            .to_string(),
+        ),
     }
 }
 
@@ -549,8 +569,8 @@ pub async fn deliver(
         }
         let thread = thread.unwrap_or_else(|| new_id("t_"));
         tx.execute(
-            "INSERT INTO mail_messages (id, user_id, blob, size, received_at, sent_at, message_id, thread_id, subject, from_addr, from_name, recipients, preview, attachments, auth, spam, category)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
+            "INSERT INTO mail_messages (id, user_id, blob, size, received_at, sent_at, message_id, thread_id, subject, from_addr, from_name, recipients, preview, attachments, auth, spam, category, heads)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
             &[
                 id.as_str().into(),
                 user_id.into(),
@@ -569,6 +589,7 @@ pub async fn deliver(
                 auth.map(|a| a.to_string()).into(),
                 spam.into(),
                 if summary.category.is_empty() { "important" } else { summary.category.as_str() }.into(),
+                summary.heads.clone().into(),
             ],
         )
         .await?;

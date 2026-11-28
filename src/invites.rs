@@ -20,7 +20,11 @@ use crate::{send, store};
 
 /// The calendar part of a message: its METHOD and text.
 pub fn calendar_part(raw: &[u8]) -> Option<(String, String)> {
-    let message = MessageParser::default().parse(raw)?;
+    calendar_of(&MessageParser::default().parse(raw)?)
+}
+
+/// The calendar part of a parsed message: its METHOD and text.
+pub fn calendar_of(message: &mail_parser::Message<'_>) -> Option<(String, String)> {
     for part in message.parts() {
         let Some(ct) = part.content_type() else {
             continue;
