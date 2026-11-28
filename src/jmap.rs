@@ -167,28 +167,18 @@ async fn mailbox_get(ctx: &Ctx<'_>, args: &Value) -> Answer {
     let mut list = Vec::new();
     let mut not_found = Vec::new();
     let mut counts: HashMap<String, (i64, i64, i64, i64)> = HashMap::new();
+    // Each folder's messages, unread ones, threads and threads with
+    // something unread, in one reading of its entries.
     for row in ctx
         .store()
         .query(
-            "SELECT e.mailbox_id, CAST(COUNT(*) AS BIGINT), CAST(SUM(CASE WHEN e.flags LIKE '%\\Seen%' THEN 0 ELSE 1 END) AS BIGINT), CAST(COUNT(DISTINCT m.thread_id) AS BIGINT) FROM mail_entries e JOIN mail_messages m ON m.id = e.message JOIN mail_mailboxes b ON b.id = e.mailbox_id WHERE b.user_id = $1 GROUP BY e.mailbox_id",
+            "SELECT e.mailbox_id, CAST(COUNT(*) AS BIGINT), CAST(SUM(CASE WHEN e.flags LIKE '%\\Seen%' THEN 0 ELSE 1 END) AS BIGINT), CAST(COUNT(DISTINCT m.thread_id) AS BIGINT), CAST(COUNT(DISTINCT CASE WHEN e.flags NOT LIKE '%\\Seen%' THEN m.thread_id END) AS BIGINT) FROM mail_entries e JOIN mail_messages m ON m.id = e.message JOIN mail_mailboxes b ON b.id = e.mailbox_id WHERE b.user_id = $1 GROUP BY e.mailbox_id",
             &[ctx.user.id.as_str().into()],
         )
         .await?
     {
         let id = row.text(0).unwrap_or_default().to_string();
-        counts.insert(id, (row.int(1).unwrap_or(0), row.int(2).unwrap_or(0), row.int(3).unwrap_or(0), 0));
-    }
-    for row in ctx
-        .store()
-        .query(
-            "SELECT e.mailbox_id, CAST(COUNT(DISTINCT m.thread_id) AS BIGINT) FROM mail_entries e JOIN mail_messages m ON m.id = e.message JOIN mail_mailboxes b ON b.id = e.mailbox_id WHERE b.user_id = $1 AND e.flags NOT LIKE '%\\Seen%' GROUP BY e.mailbox_id",
-            &[ctx.user.id.as_str().into()],
-        )
-        .await?
-    {
-        if let Some(c) = counts.get_mut(row.text(0).unwrap_or_default()) {
-            c.3 = row.int(1).unwrap_or(0);
-        }
+        counts.insert(id, (row.int(1).unwrap_or(0), row.int(2).unwrap_or(0), row.int(3).unwrap_or(0), row.int(4).unwrap_or(0)));
     }
     let order = |role: Option<&str>| {
         store::DEFAULT_MAILBOXES
@@ -840,7 +830,191 @@ fn parse_utc(text: &str) -> Option<i64> {
     Some(dt.to_timestamp() * 1000)
 }
 
+/// The folder and the category a filter requires (its own keys, or an
+/// `AND` of plain conditions): the database narrows to them exactly, the
+/// rest of the filter is still checked by [`matches`].
+fn narrowing(filter: &Value) -> (Option<String>, Option<String>) {
+    let mut found = (None, None);
+    let mut take = |c: &Value| {
+        if c.get("operator").is_some() {
+            return;
+        }
+        if let Some(m) = c.get("inMailbox").and_then(Value::as_str) {
+            found.0 = Some(m.to_string());
+        }
+        if let Some(k) = c.get("ortusCategory").and_then(Value::as_str) {
+            found.1 = Some(k.to_string());
+        }
+    };
+    match filter.get("operator").and_then(Value::as_str) {
+        None => take(filter),
+        Some("AND") => {
+            for c in filter
+                .get("conditions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                take(c);
+            }
+        }
+        Some(_) => {}
+    }
+    found
+}
+
+/// Messages read from the database at a time while a query looks.
+const QUERY_CHUNK: usize = 256;
+
+/// `Email/query` by date (the clients' lists), without reading the whole
+/// mailbox: the newest (or oldest) messages in the folder and category the
+/// filter requires come from the database a chunk at a time, are checked
+/// by [`matches`] and collapsed as before, and the reading stops once the
+/// page is full, unless a total, an anchor or a position from the end is
+/// asked for. `None`: a sort or filter this does not take (a body search,
+/// size or subject order), answered by reading everything.
+async fn email_query_by_date(ctx: &Ctx<'_>, args: &Value) -> Result<Option<Value>, MethodError> {
+    let filter = args.get("filter").cloned().unwrap_or(Value::Null);
+    let filter_text = filter.to_string();
+    if filter_text.contains("\"text\"") || filter_text.contains("\"body\"") {
+        return Ok(None);
+    }
+    let sort = args
+        .get("sort")
+        .and_then(Value::as_array)
+        .and_then(|s| s.first());
+    if !matches!(
+        sort.and_then(|s| s.get("property")).and_then(Value::as_str),
+        None | Some("receivedAt")
+    ) {
+        return Ok(None);
+    }
+    let ascending = sort
+        .and_then(|s| s.get("isAscending"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let collapse = args
+        .get("collapseThreads")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let anchor = args.get("anchor").and_then(Value::as_str);
+    let position = args.get("position").and_then(Value::as_i64).unwrap_or(0);
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(100, |l| (l as usize).min(MAX_OBJECTS));
+    let total_wanted = args
+        .get("calculateTotal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let read_all = total_wanted || anchor.is_some() || position < 0;
+    let enough = position.max(0) as usize + limit;
+    let needs_people = ["\"from\"", "\"to\"", "\"cc\"", "\"bcc\""]
+        .iter()
+        .any(|k| filter_text.contains(k));
+    let (folder, category) = narrowing(&filter);
+
+    let mut sql = String::from("SELECT id, received_at FROM mail_messages WHERE user_id = $1");
+    let mut values: Vec<ortus_core::storage::Value> = vec![ctx.user.id.as_str().into()];
+    if let Some(c) = &category {
+        values.push(c.as_str().into());
+        sql += &format!(" AND category = ${}", values.len());
+    }
+    if let Some(m) = &folder {
+        values.push(m.as_str().into());
+        sql += &format!(" AND EXISTS (SELECT 1 FROM mail_entries e WHERE e.message = mail_messages.id AND e.mailbox_id = ${})", values.len());
+    }
+    // After the last message read: newer first by (received_at, id), the
+    // order the whole-mailbox reading has (and its reverse).
+    let (after, order) = if ascending {
+        (
+            " AND (received_at > ${t} OR (received_at = ${t} AND id < ${i}))",
+            " ORDER BY received_at ASC, id DESC",
+        )
+    } else {
+        (
+            " AND (received_at < ${t} OR (received_at = ${t} AND id > ${i}))",
+            " ORDER BY received_at DESC, id",
+        )
+    };
+    let mut last: Option<(i64, String)> = None;
+    let mut seen_threads = HashSet::new();
+    let mut hits: Vec<String> = Vec::new();
+    loop {
+        let mut page_sql = sql.clone();
+        let mut page_values = values.clone();
+        if let Some((t, i)) = &last {
+            page_values.push((*t).into());
+            page_values.push(i.as_str().into());
+            page_sql += &after
+                .replace("${t}", &format!("${}", page_values.len() - 1))
+                .replace("${i}", &format!("${}", page_values.len()));
+        }
+        page_sql += &format!("{order} LIMIT {QUERY_CHUNK}");
+        let rows = ctx.store().query(&page_sql, &page_values).await?;
+        let Some(end) = rows.last() else { break };
+        last = Some((
+            end.int(1).unwrap_or(0),
+            end.text(0).unwrap_or_default().to_string(),
+        ));
+        let ids: Vec<String> = rows
+            .iter()
+            .map(|r| r.text(0).unwrap_or_default().to_string())
+            .collect();
+        let people: HashMap<String, (String, String)> = if needs_people {
+            let (list, mut v) = ortus_core::storage::any_of(2, &ids);
+            v.insert(0, ctx.user.id.as_str().into());
+            ctx.store()
+                .query(&format!("SELECT id, COALESCE(from_name, '') || ' ' || COALESCE(from_addr, ''), recipients FROM mail_messages WHERE user_id = $1 AND id IN ({list})"), &v)
+                .await?
+                .iter()
+                .map(|r| (r.text(0).unwrap_or_default().to_string(), (r.text(1).unwrap_or_default().to_string(), r.text(2).unwrap_or_default().to_string())))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        for s in stored(ctx, &ids).await? {
+            let (from, recipients) = people.get(&s.id).cloned().unwrap_or_default();
+            if !filter.is_null() && !matches(&filter, &s, "", &from, &recipients)? {
+                continue;
+            }
+            if collapse && !seen_threads.insert(s.thread.clone()) {
+                continue;
+            }
+            hits.push(s.id);
+        }
+        if rows.len() < QUERY_CHUNK || (!read_all && hits.len() >= enough) {
+            break;
+        }
+    }
+    let mut position = position;
+    if let Some(anchor) = anchor {
+        let at = hits
+            .iter()
+            .position(|h| h == anchor)
+            .ok_or(MethodError("anchorNotFound", None))? as i64;
+        position = (at
+            + args
+                .get("anchorOffset")
+                .and_then(Value::as_i64)
+                .unwrap_or(0))
+        .max(0);
+    }
+    if position < 0 {
+        position = (hits.len() as i64 + position).max(0);
+    }
+    let page: Vec<&String> = hits.iter().skip(position as usize).take(limit).collect();
+    let mut out = json!({"accountId": ctx.user.id, "queryState": ctx.state().await?, "canCalculateChanges": false, "position": position, "ids": page, "limit": limit});
+    if read_all {
+        out["total"] = json!(hits.len());
+    }
+    Ok(Some(out))
+}
+
 async fn email_query(ctx: &Ctx<'_>, args: &Value) -> Answer {
+    if let Some(answer) = email_query_by_date(ctx, args).await? {
+        return Ok(answer);
+    }
     let filter = args.get("filter").cloned().unwrap_or(Value::Null);
     let filter_text = filter.to_string();
     let needs_body = filter_text.contains("\"text\"") || filter_text.contains("\"body\"");
